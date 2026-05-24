@@ -51,6 +51,12 @@ TOPICS_DIR = "topics"
 LOGS_DIR = "logs"
 INDEX_FILE = ".index.json"
 
+# Paired open/close sentinels used by every stored block. Boundary detection
+# is sentinel-anchored (rather than "any line starting with ``<!--``") so user
+# content that legitimately begins with a markdown comment is preserved.
+BLOCK_OPEN_TAG = "AGENT_HARNESS_BLOCK"
+BLOCK_CLOSE_TAG = "/AGENT_HARNESS_BLOCK"
+
 # Entry-file caps (LT5). 400 lines OR 50 KB, whichever bites first. The cap is
 # enforced on ``remember`` writes that target MEMORY.md, not on reads — a
 # pre-existing oversized file is left alone so users can't lose memory simply
@@ -98,6 +104,15 @@ def default_root(cwd: Path | None = None, *, home: Path | None = None) -> Path:
     """Compute the canonical per-project memory root (LT4).
 
     ``~/.agent_harness/projects/<sha256(git_root)[:12]>/memory/``
+
+    .. warning::
+        This function shells out to ``git rev-parse --show-toplevel`` with
+        a 2-second timeout. That is a blocking subprocess call — it must
+        not be invoked from inside a running event loop. The constructor
+        of :class:`MemdirLongTermMemory` calls this synchronously; build
+        the instance during application startup, not inside a hot async
+        path. If git is missing or the call fails, falls back to
+        ``cwd.resolve()`` rather than raising.
 
     Example:
         >>> import tempfile
@@ -208,6 +223,11 @@ class MemdirLongTermMemory(LongTermMemory):
         return out
 
     def _write_index(self, rows: Iterable[_IndexRecord]) -> None:
+        # TODO(v0.0.2): the index is fully rewritten on every ``remember``. At
+        # 1k+ memories that becomes the dominant write cost. Switch to a JSONL
+        # log with periodic compaction (append on remember, full rewrite on
+        # forget) to amortize this. v0.0.1 favors correctness over perf — the
+        # rewrite is durable and trivially recoverable.
         serialised = [
             {
                 "id": r.id,
@@ -242,12 +262,26 @@ class MemdirLongTermMemory(LongTermMemory):
         ts: datetime,
         key: str | None,
     ) -> None:
-        """Append one fenced block to a markdown file under root."""
+        """Append one fenced block to a markdown file under root.
+
+        Every stored block is bracketed by two unambiguous sentinel comments:
+
+        * ``<!-- AGENT_HARNESS_BLOCK id=<short> ts=<iso> [key=<key>] -->``
+        * ``<!-- /AGENT_HARNESS_BLOCK id=<short> -->``
+
+        Using a paired open/close sentinel — rather than treating *any* line
+        starting with ``<!--`` as a boundary — preserves user content that
+        legitimately begins with a markdown comment (otherwise the block
+        body is silently truncated at the first such line).
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        header_bits = [f"id={memory_id[:12]}", f"ts={ts.isoformat()}"]
+        short_id = memory_id[:12]
+        header_bits = [f"id={short_id}", f"ts={ts.isoformat()}"]
         if key:
             header_bits.append(f"key={key}")
-        block = f"\n<!-- {' '.join(header_bits)} -->\n{body.rstrip()}\n"
+        open_marker = f"<!-- {BLOCK_OPEN_TAG} {' '.join(header_bits)} -->"
+        close_marker = f"<!-- {BLOCK_CLOSE_TAG} id={short_id} -->"
+        block = f"\n{open_marker}\n{body.rstrip()}\n{close_marker}\n"
         existing = path.read_text(encoding="utf-8") if path.exists() else ""
         path.write_text(existing + block, encoding="utf-8")
         # Cap the entry file (LT5). Apply only to MEMORY.md to keep topic /
@@ -256,15 +290,34 @@ class MemdirLongTermMemory(LongTermMemory):
             self._trim_entry_file(path)
 
     def _trim_entry_file(self, path: Path) -> None:
-        """Trim MEMORY.md to the configured line + byte caps, oldest-first."""
+        """Trim MEMORY.md to the configured line + byte caps, oldest-first.
+
+        Computes byte budgets once and trims from the front in O(n) — the
+        previous implementation rejoined / re-encoded the whole buffer on
+        every loop iteration (O(n²) on line count). Memory_id-anchored
+        blocks are line-granular, so trimming on line boundaries is fine.
+        """
         text = path.read_text(encoding="utf-8")
         lines = text.splitlines()
-        # Drop oldest leading lines until both caps are satisfied.
-        while len(lines) > MAX_ENTRY_LINES or (
-            len("\n".join(lines).encode("utf-8")) > MAX_ENTRY_BYTES and lines
-        ):
-            lines.pop(0)
-        path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        if not lines:
+            path.write_text("", encoding="utf-8")
+            return
+        # Precompute per-line byte costs (UTF-8 + the implicit ``\n`` joiner).
+        # ``\n`` joiner contributes one byte between lines, not after the last.
+        sizes = [len(line.encode("utf-8")) for line in lines]
+        total_bytes = sum(sizes) + max(0, len(sizes) - 1)
+        drop = 0
+        n = len(lines)
+        while n - drop > 0 and (n - drop > MAX_ENTRY_LINES or total_bytes > MAX_ENTRY_BYTES):
+            # Drop the oldest remaining line; account for its bytes and the
+            # joiner immediately following it (if any lines remain after).
+            removed = sizes[drop]
+            total_bytes -= removed
+            if n - drop > 1:
+                total_bytes -= 1  # joining "\n" preceding the next line
+            drop += 1
+        kept = lines[drop:]
+        path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
 
     # --- LongTermMemory API ------------------------------------------------
 
@@ -379,19 +432,46 @@ class MemdirLongTermMemory(LongTermMemory):
         return [m for _, m in scored[:limit]]
 
     def _extract_block(self, path: Path, memory_id: str) -> str | None:
-        """Return the body of the fenced block with ``id={memory_id[:12]}``."""
-        marker = f"id={memory_id[:12]}"
+        """Return the body of the fenced block with ``id={memory_id[:12]}``.
+
+        Boundary detection requires a paired open/close sentinel
+        (``AGENT_HARNESS_BLOCK`` / ``/AGENT_HARNESS_BLOCK``), so a user-
+        authored line beginning with ``<!--`` inside the body does *not*
+        terminate the block. Legacy files written before sentinels existed
+        fall back to the original "next ``<!--``" boundary.
+        """
+        short_id = memory_id[:12]
+        marker = f"id={short_id}"
         text = path.read_text(encoding="utf-8")
         lines = text.splitlines()
         body: list[str] = []
         capturing = False
+        legacy = False
         for line in lines:
-            if line.startswith("<!--") and marker in line:
+            if _is_block_open(line) and marker in line:
                 capturing = True
+                legacy = False
+                body = []
+                continue
+            # Legacy detection: pre-sentinel files used a bare ``<!--`` opener
+            # that also contained ``id=``. Treat that as a legacy block whose
+            # boundary is the next ``<!--`` line.
+            if (
+                not capturing
+                and line.startswith("<!--")
+                and marker in line
+                and not _is_block_open(line)
+                and not _is_block_close(line)
+            ):
+                capturing = True
+                legacy = True
                 body = []
                 continue
             if capturing:
-                if line.startswith("<!--"):  # next block starts
+                if _is_block_close(line) and marker in line:
+                    break
+                if legacy and line.startswith("<!--"):
+                    # Pre-sentinel boundary: next block starts.
                     break
                 body.append(line)
         result = "\n".join(body).strip()
@@ -417,18 +497,39 @@ class MemdirLongTermMemory(LongTermMemory):
         path = self.root / removed.path
         if not path.exists():
             return
-        marker = f"id={memory_id[:12]}"
+        short_id = memory_id[:12]
+        marker = f"id={short_id}"
         text = path.read_text(encoding="utf-8")
         lines = text.splitlines()
         out: list[str] = []
         skipping = False
+        legacy_skip = False
         for line in lines:
-            if line.startswith("<!--") and marker in line:
+            if _is_block_open(line) and marker in line:
                 skipping = True
+                legacy_skip = False
+                continue
+            if (
+                not skipping
+                and line.startswith("<!--")
+                and marker in line
+                and not _is_block_open(line)
+                and not _is_block_close(line)
+            ):
+                # Legacy pre-sentinel block — boundary is the next ``<!--``.
+                skipping = True
+                legacy_skip = True
                 continue
             if skipping:
-                if line.startswith("<!--"):
+                if _is_block_close(line) and marker in line:
                     skipping = False
+                    legacy_skip = False
+                    continue
+                if legacy_skip and line.startswith("<!--"):
+                    # Next block starts; emit this header line.
+                    skipping = False
+                    legacy_skip = False
+                    # fall through to append
                 else:
                     continue
             out.append(line)
@@ -486,3 +587,13 @@ def _parse_iso(value: str) -> datetime:
         return datetime.fromisoformat(value)
     except ValueError:
         return datetime.fromtimestamp(0, tz=UTC)
+
+
+def _is_block_open(line: str) -> bool:
+    """True iff ``line`` is the opening sentinel of a stored block."""
+    return line.startswith(f"<!-- {BLOCK_OPEN_TAG} ")
+
+
+def _is_block_close(line: str) -> bool:
+    """True iff ``line`` is the closing sentinel of a stored block."""
+    return line.startswith(f"<!-- {BLOCK_CLOSE_TAG} ")

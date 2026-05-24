@@ -324,10 +324,12 @@ class SkillRegistry:
 
         ``project_root`` is treated as the project's working directory; the
         skills root is ``<project_root>/.agent/skills``. ``user_root`` is the
-        user-scope root (defaults to ``Path.home()`` if ``None`` is passed
-        explicitly — pass ``user_root=Path("/nonexistent")`` or the sentinel
-        ``False`` equivalent at the call-site to skip user scope; for tests
-        we accept ``None`` to mean "skip"). Pass ``Path.home()`` to opt in.
+        user-scope root; the skills root is ``<user_root>/.agent_harness/skills``.
+
+        Passing ``None`` for either ``project_root`` or ``user_root`` **skips
+        that scope entirely** — there is no implicit ``Path.home()`` fallback.
+        Callers that want the user scope pass ``user_root=Path.home()``
+        explicitly. Project entries shadow user entries with the same name.
 
         Discovery is non-recursive: each skill lives at
         ``<scope_root>/<name>/SKILL.md``. Other files are ignored.

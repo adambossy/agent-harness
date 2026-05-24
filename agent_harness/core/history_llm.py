@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from .events import CompactionEnd, CompactionStart, ModelEnd
@@ -46,7 +47,13 @@ from .models import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - import-time only
+    import asyncio
     from collections.abc import AsyncIterator
+
+
+# Module-level task set keeping references to fire-and-forget event-publish
+# tasks alive so they aren't GC'd before completion (RUF006).
+_BG_TASKS: set[asyncio.Task[None]] = set()
 
 
 # --- Public constants -------------------------------------------------------
@@ -123,14 +130,59 @@ def _is_micro_compacted(block: ToolResultBlock) -> bool:
 
 
 def _attribute_usage(ctx: Any | None, usage: Usage) -> None:
-    """Add ``usage`` to ``ctx.usage`` (HP5). No-op if ctx lacks ``usage``."""
+    """Add ``usage`` to ``ctx.usage`` (HP5).
+
+    HP5 (cost attribution) is load-bearing for billing, so swallowing the
+    write quietly is too risky. We tighten the suppress to
+    ``AttributeError`` — the documented case where ``ctx.usage`` is not
+    assignable (e.g. ``SimpleNamespace`` with a read-only descriptor or
+    a frozen dataclass). On suppression we publish an ``Error`` event on
+    ``ctx.event_bus`` (when present, ``recoverable=True``) so billing-side
+    operators can see that attribution dropped on a turn rather than
+    silently miss the line-item.
+
+    Other exception types (e.g. ``TypeError`` from ``Usage.__add__``
+    encountering a wrong operand) are deliberately *not* swallowed — they
+    indicate a real bug at the call site and should surface.
+    """
     if ctx is None:
         return
     existing = getattr(ctx, "usage", None)
     if existing is None:
         return
-    with contextlib.suppress(AttributeError, TypeError):
+    try:
         ctx.usage = existing + usage
+    except AttributeError as exc:
+        # Documented case: ctx.usage is read-only. Surface via event bus.
+        bus = _bus(ctx)
+        if bus is None:
+            return
+        publish = getattr(bus, "publish", None)
+        if publish is None:
+            return
+        from .events import Error  # local: avoid import cycle at module top
+
+        event = Error(
+            message=f"HP5 usage attribution dropped: {exc}",
+            cause=type(exc),
+            recoverable=True,
+        )
+        # Fire-and-forget: schedule on the running loop if any; otherwise
+        # close the coro to avoid an "unawaited coroutine" warning.
+        coro = publish(event)
+        if hasattr(coro, "__await__"):
+            import asyncio as _asyncio
+
+            try:
+                loop = _asyncio.get_running_loop()
+                # Hold a reference so the GC doesn't reap a still-pending task.
+                _BG_TASKS.add(task := loop.create_task(coro))
+                task.add_done_callback(_BG_TASKS.discard)
+            except RuntimeError:
+                # No running loop — best we can do is close the coroutine
+                # to avoid the unawaited-coro warning. Fail-soft.
+                with contextlib.suppress(Exception):
+                    coro.close()
 
 
 def _model_from_ctx(ctx: Any | None) -> Any | None:
@@ -153,8 +205,6 @@ async def _run_model_summary(
     ``ctx.usage`` (HP5). Sends a tiny two-message slice so that providers
     treat it as a fresh turn (no tool catalog).
     """
-    from datetime import UTC, datetime
-
     now = datetime.now(UTC)
     msgs: list[Message] = [
         Message(role="system", content=[TextBlock(text=instruction)], timestamp=now),
@@ -361,6 +411,29 @@ def _is_summary_message(msg: Message) -> bool:
     return isinstance(block, TextBlock) and block.text.startswith(SUMMARY_MARKER_PREFIX)
 
 
+def _summary_input(msgs: list[Message]) -> str:
+    """Render ``msgs`` into the deterministic text body used by SummarizeOldTurns.
+
+    The output of this function is BOTH:
+
+    1. the body shown to the model for summarization, AND
+    2. the input to the SHA-256 that keys :class:`SummarizeOldTurns`'s cache
+       (the marker preserved across turns is ``[summary; sha256=<hash>]``).
+
+    Because the hash is load-bearing for HP4 (cache preservation across
+    turns), the format must be stable. Specifically, it concatenates
+    ``[<role>] <text>`` per message, joined by ``\\n\\n`` — using only
+    ``Message.role`` and ``Message.text`` (which currently is the
+    ``TextBlock`` text concatenated, *not* timestamps or tool-call IDs).
+
+    If a future change adds non-text material to ``Message.text`` (e.g.
+    folds in timestamps or tool-call IDs), the cache invalidates between
+    turns even for the same logical prefix. Reviewers: keep this in sync
+    with the ``Message.text`` accessor.
+    """
+    return "\n\n".join(f"[{m.role}] {m.text}" for m in msgs if m.text)
+
+
 class SummarizeOldTurns:
     """LLM-summarize the oldest turns when estimated tokens exceed a threshold.
 
@@ -407,7 +480,7 @@ class SummarizeOldTurns:
         old, recent = msgs[:keep_start], msgs[keep_start:]
         if len(old) == 1 and _is_summary_message(old[0]):
             return list(msgs)
-        body = "\n\n".join(f"[{m.role}] {m.text}" for m in old if m.text)
+        body = _summary_input(old)
         h = _content_hash(body)
         cached = self._cache.get(h)
         bus = _bus(ctx)

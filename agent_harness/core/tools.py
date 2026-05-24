@@ -316,11 +316,11 @@ def _build_schema(fn: Callable[..., Any], param_descs: dict[str, str]) -> dict[s
 
 
 @overload
-def tool(fn: F, /) -> Tool: ...
+def tool(fn: F, /) -> Tool: ...  # TypeVar F shared across overloads
 
 
 @overload
-def tool(
+def tool(  # TypeVar F shared across overloads
     *,
     name: str | None = ...,
     description: str | None = ...,
@@ -328,7 +328,7 @@ def tool(
 ) -> Callable[[F], Tool]: ...
 
 
-def tool(
+def tool(  # using TypeVar (F) is clearer than PEP 695 across the three overloads
     fn: F | None = None,
     /,
     *,

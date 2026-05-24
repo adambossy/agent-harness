@@ -126,6 +126,23 @@ def test_resolver_with_stubs_returns_placeholder() -> None:
     assert resolved.error is None
     assert "src/a.py" in resolved.content
     assert "stub" in resolved.content.lower()
+    # is_stub=True signals the loop that this is a placeholder, not real
+    # content — callers must skip or warn rather than route to the model.
+    assert resolved.is_stub is True
+
+
+def test_resolver_stub_content_is_self_describing() -> None:
+    """Stub content must obviously declare itself as not-yet-wired so a model
+    that sees it (e.g. a caller that forgot the ``is_stub`` check) gets an
+    obviously-placeholder snippet rather than confidently-wrong context."""
+
+    resolver = MentionResolver()
+    for verb in ("file", "url", "problems", "terminal", "git-changes", "sha"):
+        mention = Mention(verb=verb, argument=None, raw=f"@{verb}")
+        resolved = resolver.resolve(mention)
+        assert resolved.is_stub is True
+        assert "stub" in resolved.content.lower()
+        assert "not yet wired" in resolved.content.lower()
 
 
 def test_resolver_register_overrides_stub() -> None:
@@ -135,6 +152,8 @@ def test_resolver_register_overrides_stub() -> None:
     resolved = resolver.resolve(mention)
     assert resolved.content == "REAL:x.py"
     assert resolved.error is None
+    # Registering a real fetcher must clear the stub flag.
+    assert resolved.is_stub is False
 
 
 def test_resolver_unsupported_verb_surfaces_error() -> None:

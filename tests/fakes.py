@@ -113,7 +113,7 @@ def _chunk_into(s: str, n: int) -> list[str]:
         return [""] * n
     size = max(1, len(s) // n)
     pieces = [s[i : i + size] for i in range(0, len(s), size)]
-    return pieces[: n - 1] + ["".join(pieces[n - 1 :])]
+    return [*pieces[: n - 1], "".join(pieces[n - 1 :])]
 
 
 class FakeModel:

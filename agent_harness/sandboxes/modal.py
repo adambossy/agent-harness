@@ -114,35 +114,37 @@ class ModalSandbox:
         if terminate is None:
             self._sandbox = None
             return
-        result = terminate()
-        if asyncio.iscoroutine(result):
-            await result
-        self._sandbox = None
+        try:
+            # Dispatch the (possibly blocking) terminate via to_thread, then
+            # await if it returned a coroutine.
+            await self._to_thread_maybe(terminate)
+        finally:
+            self._sandbox = None
 
     async def _ensure_sandbox(self) -> Any:
         if self._sandbox is not None:
             return self._sandbox
         async with self._lock:
-            # Re-check under the lock to defeat the obvious race; another
-            # coroutine may have set ``_sandbox`` while we awaited the
-            # lock. The ``type: ignore`` exists because mypy cannot model
-            # concurrent state mutation across the await point.
-            if self._sandbox is not None:
-                return self._sandbox  # type: ignore[unreachable]
-            modal = self._modal
-            image = self._image or modal.Image.debian_slim()
-            app = modal.App.lookup(self._app_name, create_if_missing=True)
-            sb = modal.Sandbox.create(
-                image=image,
-                app=app,
-                workdir=self.root,
-            )
-            # ``modal.Sandbox.create`` is sync in some versions, async in
-            # others; tolerate both.
-            if asyncio.iscoroutine(sb):
-                sb = await sb
-            self._sandbox = sb
-        return self._sandbox
+            # Re-check under the lock to defeat the obvious race — another
+            # coroutine may have set ``_sandbox`` while we were waiting.
+            if self._sandbox is None:
+                modal = self._modal
+                image = self._image or modal.Image.debian_slim()
+                # SDK calls below may be blocking gRPC — run on a worker
+                # thread, then await if they returned a coroutine. Keeps the
+                # event loop responsive during the (one-shot) container spin.
+                app = await self._to_thread_maybe(
+                    modal.App.lookup,
+                    self._app_name,
+                    create_if_missing=True,
+                )
+                self._sandbox = await self._to_thread_maybe(
+                    modal.Sandbox.create,
+                    image=image,
+                    app=app,
+                    workdir=self.root,
+                )
+            return self._sandbox
 
     # --- Timeout helper ---------------------------------------------------
 
@@ -171,12 +173,29 @@ class ModalSandbox:
             return await value
         return value
 
+    @staticmethod
+    async def _to_thread_maybe(fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+        """Invoke a Modal SDK method on a worker thread, then ``await`` if it
+        returned a coroutine.
+
+        The Modal SDK ships both sync and async variants of the same name in
+        different versions; some are thin gRPC-blocking wrappers, others
+        return awaitables. Dispatching the call itself through
+        :func:`asyncio.to_thread` keeps the event loop responsive in the
+        blocking case; the ``await self._await_maybe(...)`` handles the
+        async case. The combination is uniformly correct.
+        """
+        result = await asyncio.to_thread(fn, *args, **kwargs)
+        if asyncio.iscoroutine(result):
+            return await result
+        return result
+
     # --- File ops ---------------------------------------------------------
 
     async def read_file(self, path: str, *, timeout: float | None = None) -> str:
         async def _op() -> str:
             sb = await self._ensure_sandbox()
-            data = await self._await_maybe(sb.read_file(path))
+            data = await self._to_thread_maybe(sb.read_file, path)
             if isinstance(data, bytes):
                 return data.decode("utf-8")
             return str(data)
@@ -197,7 +216,7 @@ class ModalSandbox:
     ) -> None:
         async def _op() -> None:
             sb = await self._ensure_sandbox()
-            await self._await_maybe(sb.write_file(path, content.encode("utf-8")))
+            await self._to_thread_maybe(sb.write_file, path, content.encode("utf-8"))
 
         try:
             await self._with_timeout(_op(), timeout, "write_file")
@@ -209,7 +228,7 @@ class ModalSandbox:
     async def stat(self, path: str, *, timeout: float | None = None) -> FileStat:
         async def _op() -> FileStat:
             sb = await self._ensure_sandbox()
-            raw = await self._await_maybe(sb.stat(path))
+            raw = await self._to_thread_maybe(sb.stat, path)
             return FileStat(
                 path=getattr(raw, "path", path),
                 size=int(getattr(raw, "size", 0)),
@@ -232,7 +251,7 @@ class ModalSandbox:
     ) -> list[FileEntry]:
         async def _op() -> list[FileEntry]:
             sb = await self._ensure_sandbox()
-            raw = await self._await_maybe(sb.listdir(path))
+            raw = await self._to_thread_maybe(sb.listdir, path)
             return [
                 FileEntry(
                     name=getattr(entry, "name", str(entry)),
@@ -251,7 +270,7 @@ class ModalSandbox:
     async def exists(self, path: str, *, timeout: float | None = None) -> bool:
         async def _op() -> bool:
             sb = await self._ensure_sandbox()
-            return bool(await self._await_maybe(sb.exists(path)))
+            return bool(await self._to_thread_maybe(sb.exists, path))
 
         try:
             return await self._with_timeout(_op(), timeout, "exists")
@@ -269,7 +288,7 @@ class ModalSandbox:
     ) -> None:
         async def _op() -> None:
             sb = await self._ensure_sandbox()
-            await self._await_maybe(sb.mkdir(path, parents=parents))
+            await self._to_thread_maybe(sb.mkdir, path, parents=parents)
 
         try:
             await self._with_timeout(_op(), timeout, "mkdir")
@@ -287,7 +306,7 @@ class ModalSandbox:
     ) -> None:
         async def _op() -> None:
             sb = await self._ensure_sandbox()
-            await self._await_maybe(sb.rm(path, recursive=recursive))
+            await self._to_thread_maybe(sb.rm, path, recursive=recursive)
 
         try:
             await self._with_timeout(_op(), timeout, "rm")
@@ -304,7 +323,7 @@ class ModalSandbox:
     ) -> bytes:
         async def _op() -> bytes:
             sb = await self._ensure_sandbox()
-            data = await self._await_maybe(sb.read_file(path))
+            data = await self._to_thread_maybe(sb.read_file, path)
             if isinstance(data, bytes):
                 return data
             return str(data).encode("utf-8")
@@ -332,24 +351,24 @@ class ModalSandbox:
 
         async def _op() -> ExecResult:
             sb = await self._ensure_sandbox()
-            proc = sb.exec(
+            # Modal's ``Sandbox.exec`` may be a sync gRPC-blocking call —
+            # dispatch via to_thread, then await if it returned a coroutine.
+            proc = await self._to_thread_maybe(
+                sb.exec,
                 *cmd,
                 workdir=cwd if cwd is not None else self.root,
                 env=env,
             )
-            proc = await self._await_maybe(proc)
             if stdin is not None and hasattr(proc, "stdin"):
-                write = proc.stdin.write(stdin)
-                await self._await_maybe(write)
+                await self._to_thread_maybe(proc.stdin.write, stdin)
                 close = getattr(proc.stdin, "drain_and_close", None) or getattr(
                     proc.stdin, "close", None
                 )
                 if close is not None:
-                    await self._await_maybe(close())
-            wait_result = proc.wait()
-            exit_code = await self._await_maybe(wait_result)
-            out_raw = await self._await_maybe(proc.stdout.read())
-            err_raw = await self._await_maybe(proc.stderr.read())
+                    await self._to_thread_maybe(close)
+            exit_code = await self._to_thread_maybe(proc.wait)
+            out_raw = await self._to_thread_maybe(proc.stdout.read)
+            err_raw = await self._to_thread_maybe(proc.stderr.read)
             return ExecResult(
                 exit_code=int(exit_code if exit_code is not None else -1),
                 stdout=_to_text(out_raw),

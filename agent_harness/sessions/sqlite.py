@@ -87,9 +87,19 @@ class SqliteSession(Session):
         # ``asyncio.to_thread`` so the connection may be touched by any
         # worker thread. The per-session asyncio lock keeps the
         # interleaving safe.
+        #
+        # Note: the connection-open and DDL run synchronously on whatever
+        # thread invokes the constructor. Builders that need strictly
+        # non-blocking construction should call this from inside an
+        # ``asyncio.to_thread`` themselves, or use ``async with
+        # SqliteSession(...)`` so the DDL still hits the same thread. In
+        # practice the open + ``executescript`` is microseconds on a local
+        # file and we keep the constructor sync to match :class:`Session`
+        # protocol expectations.
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        self._closed = False
 
     # --- messages -----------------------------------------------------------
 

@@ -301,3 +301,42 @@ async def test_recall_results_are_memory_dataclasses(tmp_root: Path) -> None:
     assert isinstance(hits[0], Memory)
     assert isinstance(hits[0].metadata, dict)
     assert hits[0].id and hits[0].content
+
+
+# --- block boundary preserves user comments --------------------------------
+
+
+async def test_remember_preserves_user_html_comment_in_body(tmp_root: Path) -> None:
+    """Body lines starting with ``<!--`` must NOT silently truncate the block.
+
+    Regression guard: pre-fix, the block ended at the first line beginning
+    with ``<!--``, so a comment in the user's content was treated as the
+    boundary of the next block and everything below it disappeared.
+    """
+    ltm = MemdirLongTermMemory(root=tmp_root)
+    payload = "<!-- a user comment -->\nimportant content after the comment"
+    mid = await ltm.remember(payload, metadata={"topic": "edge-cases"})
+
+    # recall by keyword in the trailing line — would miss if truncation occurred
+    hits = await ltm.recall("important content", filter={"topic": "edge-cases"})
+    assert len(hits) == 1
+    assert "important content after the comment" in hits[0].content
+    assert "<!-- a user comment -->" in hits[0].content
+    # And list_memories must also reconstruct the full body.
+    rows = await ltm.list_memories()
+    target = next(m for m in rows if m.id == mid)
+    assert "<!-- a user comment -->" in target.content
+    assert "important content after the comment" in target.content
+
+
+async def test_forget_preserves_neighboring_blocks_with_html_comments(
+    tmp_root: Path,
+) -> None:
+    """Forget must use sentinel boundaries, not bare ``<!--``."""
+    ltm = MemdirLongTermMemory(root=tmp_root)
+    a = await ltm.remember("first <!-- inline --> block", metadata={"topic": "t"})
+    _b = await ltm.remember("second block keep-me", metadata={"topic": "t"})
+    await ltm.forget(a)
+    hits = await ltm.recall("keep-me", filter={"topic": "t"})
+    assert len(hits) == 1
+    assert "second block keep-me" in hits[0].content

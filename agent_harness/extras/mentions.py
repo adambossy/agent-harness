@@ -74,19 +74,29 @@ class ResolvedMention:
     a short placeholder describing the failure so the model still sees
     *something*.
 
+    ``is_stub`` is True when the resolution came from one of the built-in
+    placeholder fetchers. Callers wiring real integrations (the loop, an
+    operator UI) should treat ``is_stub=True`` as "this content is a
+    development placeholder — do NOT route it to the model as real
+    context"; the loop is expected to either skip the snippet or surface
+    a UX warning. The content is still self-describing
+    (``[stub: @verb not yet wired]``) for cases where a placeholder is
+    acceptable.
+
     Example:
         >>> r = ResolvedMention(
         ...     mention=Mention(verb="file", argument="x", raw="@file:x"),
         ...     content="hello",
         ...     error=None,
         ... )
-        >>> r.content
-        'hello'
+        >>> r.content, r.is_stub
+        ('hello', False)
     """
 
     mention: Mention
     content: str
     error: str | None = None
+    is_stub: bool = False
 
 
 # A fetcher is an async-or-sync callable that takes the parsed Mention and
@@ -167,35 +177,61 @@ def _split_verb_arg(body: str) -> tuple[str | None, str | None]:
 class MentionResolver:
     """Pluggable verb→fetcher registry.
 
-    Construct with the defaults (which are stubs), then register real
-    fetchers for the verbs your runtime supports. Unknown verbs resolve to
-    an error snippet so the loop never crashes on a typo.
+    Construct with the defaults (which are clearly-labeled stubs) and
+    register real fetchers for the verbs your runtime supports. The stubs
+    return a self-describing placeholder and set ``ResolvedMention.is_stub
+    = True`` so callers can detect "no real fetcher registered" — the loop
+    is expected to either skip stub content or surface a UX warning rather
+    than treating it as authentic file / URL / git context.
+
+    Real fetchers MUST be registered by the loop integration (Wave 4) for
+    each verb the deployment supports.
 
     Example:
         >>> resolver = MentionResolver()
         >>> resolver.register("file", lambda m: f"<contents of {m.argument}>")
         >>> resolved = resolver.resolve_all("see @file:notes.md")
-        >>> resolved[0].content
-        '<contents of notes.md>'
+        >>> resolved[0].content, resolved[0].is_stub
+        ('<contents of notes.md>', False)
     """
 
-    __slots__ = ("_fetchers",)
+    __slots__ = ("_fetchers", "_stub_verbs")
+
+    # Verbs for which the resolver ships a development placeholder. A real
+    # fetcher registered via :meth:`register` removes the verb from the
+    # stub set, so ``is_stub`` becomes False on subsequent resolutions.
+    _DEFAULT_STUB_VERBS: tuple[str, ...] = (
+        "file",
+        "url",
+        "problems",
+        "terminal",
+        "git-changes",
+        "sha",
+    )
 
     def __init__(self) -> None:
         self._fetchers: dict[str, Fetcher] = {}
-        # Register stubs so callers get a useful placeholder even before they
-        # plug real fetchers in.
-        for verb in ("file", "url", "problems", "terminal", "git-changes", "sha"):
+        self._stub_verbs: set[str] = set()
+        # Register clearly-labelled stubs so callers get a useful placeholder
+        # in development; ``is_stub=True`` on the returned ResolvedMention
+        # tells the loop to skip / warn rather than treat it as real context.
+        for verb in self._DEFAULT_STUB_VERBS:
             self._fetchers[verb] = _stub_fetcher(verb)
+            self._stub_verbs.add(verb)
 
     def register(self, verb: str, fetcher: Fetcher) -> None:
         """Register / replace a fetcher for ``verb``.
+
+        Calling :meth:`register` with a real fetcher removes the verb from
+        the stub set, so subsequent ``ResolvedMention``s carry
+        ``is_stub=False``.
 
         Example:
             >>> MentionResolver().register("file", lambda m: "ok")  # no error
         """
 
         self._fetchers[verb] = fetcher
+        self._stub_verbs.discard(verb)
 
     def resolve(self, mention: Mention) -> ResolvedMention:
         """Fetch the snippet for a single mention.
@@ -211,6 +247,7 @@ class MentionResolver:
                 mention=mention,
                 content=f"[mention @{mention.verb}: unsupported]",
                 error=f"unsupported verb: {mention.verb}",
+                is_stub=False,
             )
         try:
             content = fetcher(mention)
@@ -219,8 +256,14 @@ class MentionResolver:
                 mention=mention,
                 content=f"[mention {mention.raw}: error]",
                 error=str(exc),
+                is_stub=False,
             )
-        return ResolvedMention(mention=mention, content=content, error=None)
+        return ResolvedMention(
+            mention=mention,
+            content=content,
+            error=None,
+            is_stub=mention.verb in self._stub_verbs,
+        )
 
     def resolve_all(self, text: str) -> list[ResolvedMention]:
         """Parse ``text`` and resolve every mention found.
@@ -236,14 +279,14 @@ class MentionResolver:
 def _stub_fetcher(verb: str) -> Fetcher:
     """Build a placeholder fetcher for a verb (v0).
 
-    Real fetchers plug in via :meth:`MentionResolver.register`. The stubs
-    return a marker string so the harness still produces *something* in
-    development before the integrations land.
+    The returned string is self-describing — it begins with ``[stub: @<verb>``
+    and says "not yet wired" — so even if a caller forgets to check
+    :attr:`ResolvedMention.is_stub`, the model sees an obviously-placeholder
+    snippet rather than a confidently-wrong "real" result.
     """
 
     def _fetch(mention: Mention) -> str:
-        if mention.argument:
-            return f"[stub @{verb}:{mention.argument}]"
-        return f"[stub @{verb}]"
+        target = f"@{verb}:{mention.argument}" if mention.argument else f"@{verb}"
+        return f"[stub: {target} not yet wired — register a real fetcher]"
 
     return _fetch

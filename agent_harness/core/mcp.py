@@ -273,12 +273,23 @@ class MCPServer:
         target: Any = any_url(uri) if any_url is not None else uri
         return await self._session.read_resource(target)
 
+    # WAVE-4 DEPENDENCY (MC6):
+    #
+    # The MCP spec requires sampling + elicitation "are supported when the
+    # server offers them." Both methods below are v0.0.1 stubs that raise
+    # NotSupportedError — full wiring (sampling -> host model.request;
+    # elicitation -> EventBus.publish(ElicitationRequested) + await user
+    # reply) lands in Wave 4 when the loop owns the per-run RunContext.
+    # Loop integration MUST replace these stubs OR explicitly suppress
+    # them before claiming MC6 conformance.
+
     async def request_sampling(self, prompt: str, **opts: Any) -> str:
         """MCP-server-initiated sampling against the host's LLM.
 
         v0.0.1 stub: optional capability is wired via callback at the
         :class:`mcp.ClientSession` boundary. Until Wave-4 integrates with
-        the active model, this raises ``NotSupportedError``.
+        the active model, this raises ``NotSupportedError``. See the
+        WAVE-4 DEPENDENCY note above the method group.
         """
         del prompt, opts
         raise NotSupportedError(
@@ -290,7 +301,8 @@ class MCPServer:
         """MCP-server-initiated user elicitation. v0.0.1 stub.
 
         Once integrated, this will publish an ``ElicitationRequested`` event
-        and await the user's structured reply.
+        and await the user's structured reply. See the WAVE-4 DEPENDENCY
+        note above the method group.
         """
         del prompt, schema
         raise NotSupportedError(
@@ -419,8 +431,24 @@ class _HTTPLike(MCPServer):
         self.headers = dict(headers) if headers is not None else {}
 
     async def _resolve_headers(self) -> dict[str, str]:
+        """Merge static + dynamic headers; auth wins on collisions.
+
+        Precedence (lowest → highest):
+
+        1. ``headers={}`` passed at construction. Static, baked in once.
+        2. The result of ``await self.auth()`` (if an :data:`AuthHandler` is
+           supplied) — this is recomputed per connect, so refreshed OAuth
+           tokens overwrite an older ``Authorization`` value passed
+           statically. This is intentional: a stale token in
+           ``headers["Authorization"]`` is almost certainly a mistake and a
+           freshly-resolved token from ``auth()`` should win.
+
+        Returns the merged dict in a fresh object so callers may mutate it
+        without affecting subsequent connects.
+        """
         merged = dict(self.headers)
         if self.auth is not None:
+            # Note: ``dict.update`` overwrites on key collision — auth wins.
             merged.update(await self.auth())
         return merged
 
