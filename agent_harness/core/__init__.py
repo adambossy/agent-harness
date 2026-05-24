@@ -51,6 +51,7 @@ from .events import (
     ToolExecEnd,
     ToolExecStart,
 )
+from .filesystem import FilesystemTools, GrepMatch
 from .graph import (
     FullPersistence,
     GraphCtx,
@@ -70,6 +71,17 @@ from .history import (
     TokenBudgetCap,
     apply_processor,
 )
+from .history_llm import (
+    COLLAPSE_MARKER_PREFIX,
+    DEFAULT_SUMMARY_TEMPLATE,
+    MICROCOMPACT_INSTRUCTION,
+    MICROCOMPACT_MARKER_PREFIX,
+    SUMMARY_MARKER_PREFIX,
+    ContextCollapse,
+    MicroCompact,
+    ProviderSideCompaction,
+    SummarizeOldTurns,
+)
 from .hooks import (
     HookConfig,
     HookEvent,
@@ -80,6 +92,7 @@ from .hooks import (
     InProcessExecutor,
     SubprocessExecutor,
 )
+from .mcp import MCPServer, MCPServerHTTP, MCPServerSSE, MCPServerStdio
 from .memory import LongTermMemory, Memory, Session
 from .models import (
     ContentBlock,
@@ -114,6 +127,7 @@ from .sandbox import (
     SandboxFilesystemConfig,
     SandboxNetworkConfig,
 )
+from .skills import Skill, SkillRegistry
 from .tools import Tool, ToolCall, ToolPolicy, ToolResult, tool
 from .toolsets import (
     TOOL_SEARCH,
@@ -145,10 +159,13 @@ __all__ = [
     "BudgetExceededError",
     "BusClosedError",
     "CachedToolset",
+    "COLLAPSE_MARKER_PREFIX",
     "CompactionEnd",
     "CompactionStart",
     "ConfigError",
     "ContentBlock",
+    "ContextCollapse",
+    "DEFAULT_SUMMARY_TEMPLATE",
     "DedupFileReads",
     "ElicitationRequested",
     "Error",
@@ -157,9 +174,11 @@ __all__ = [
     "ExecResult",
     "FileEntry",
     "FileStat",
+    "FilesystemTools",
     "FilteredToolset",
     "FullPersistence",
     "GraphCtx",
+    "GrepMatch",
     "HistoryProcessor",
     "HistorySnip",
     "HookConfig",
@@ -174,8 +193,15 @@ __all__ = [
     "InProcessExecutor",
     "Interruption",
     "LongTermMemory",
+    "MCPServer",
+    "MCPServerHTTP",
+    "MCPServerSSE",
+    "MCPServerStdio",
+    "MICROCOMPACT_INSTRUCTION",
+    "MICROCOMPACT_MARKER_PREFIX",
     "Memory",
     "Message",
+    "MicroCompact",
     "MessageDelta",
     "MessageEnd",
     "MessageStart",
@@ -194,9 +220,11 @@ __all__ = [
     "PrefixedToolset",
     "Provider",
     "ProviderEvent",
+    "ProviderSideCompaction",
     "RunEnd",
     "RunStart",
     "RunStateSnapshot",
+    "SUMMARY_MARKER_PREFIX",
     "Sandbox",
     "SandboxConfig",
     "SandboxError",
@@ -205,8 +233,11 @@ __all__ = [
     "SandboxTimeoutError",
     "SchemaError",
     "Session",
+    "Skill",
+    "SkillRegistry",
     "StatePersistence",
     "StaticToolset",
+    "SummarizeOldTurns",
     "SubagentStart",
     "SubagentStop",
     "SubprocessExecutor",
