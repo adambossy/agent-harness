@@ -33,5 +33,6 @@ repos:
           - pydantic>=2.10
           - pydantic-graph>=0.0.20
           - pytest>=8.0
+          - griffe>=1.5
         # Mypy resolves modules itself; pass nothing on the command line.
         pass_filenames: false

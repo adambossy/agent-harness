@@ -118,3 +118,9 @@ disallow_untyped_decorators = false
 [[tool.mypy.overrides]]
 module = ["modal.*", "pgvector.*", "mcp.*"]
 ignore_missing_imports = true
+
+# Optional provider SDKs (anthropic / openai / google-genai) — imported lazily
+# inside provider adapters; absence in the dev venv is intentional.
+[[tool.mypy.overrides]]
+module = ["anthropic.*", "openai.*", "google.*", "google.genai.*"]
+ignore_missing_imports = true
