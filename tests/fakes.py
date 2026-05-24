@@ -4,8 +4,9 @@
 - :class:`FakeTurn` — one scripted assistant response.
 - :class:`FakeModel` — deterministic :class:`Model` yielding scripted turns
   as a typed event stream; chunks text into 3 cumulative deltas (EV5).
-- :class:`FakeSandbox` — in-memory dict-backed sandbox; duck-types the
-  9-method ``Sandbox`` Protocol (which is built in a parallel worktree).
+- :class:`FakeSandbox` — in-memory dict-backed sandbox; satisfies the
+  9-method ``Sandbox`` Protocol structurally and returns the real
+  ``FileStat`` / ``FileEntry`` / ``ExecResult`` dataclasses.
 
 Example:
     >>> import asyncio
@@ -45,6 +46,7 @@ from agent_harness.core.models import (
     ToolCallBlock,
     Usage,
 )
+from agent_harness.core.sandbox import ExecResult, FileEntry, FileStat, SandboxConfig
 from agent_harness.core.tools import ToolCall
 
 # --- FakeProvider -----------------------------------------------------------
@@ -213,9 +215,9 @@ class _FileNode:
 class FakeSandbox:
     """In-memory dict-backed ``Sandbox``.
 
-    Duck-types the 9-method Protocol from ``core/sandbox.py``; we don't
-    inherit (Protocol is built in a parallel worktree). At integration time
-    the ``@runtime_checkable`` Protocol accepts this class structurally.
+    Structurally satisfies the 9-method :class:`Sandbox` Protocol from
+    ``core/sandbox.py`` and returns the real :class:`FileStat`,
+    :class:`FileEntry`, :class:`ExecResult` dataclasses.
 
     Example:
         >>> import asyncio
@@ -228,9 +230,7 @@ class FakeSandbox:
     def __init__(self, root: str = "/workspace", name: str = "fake-sandbox") -> None:
         self.name: str = name
         self.root: str = root
-        # ``config`` is typed ``Any`` so we don't need to import the (parallel-
-        # worktree) ``SandboxConfig`` here.
-        self.config: Any = None
+        self.config: SandboxConfig = SandboxConfig()
         self._files: dict[str, _FileNode] = {}
         self._dirs: set[str] = {""}
 
@@ -245,20 +245,25 @@ class FakeSandbox:
         del timeout
         self._files[path] = _FileNode(content=content.encode("utf-8"), mtime=datetime.now(UTC))
 
-    async def stat(self, path: str, *, timeout: float | None = None) -> Any:
+    async def stat(self, path: str, *, timeout: float | None = None) -> FileStat:
         del timeout
         node = self._files.get(path)
         if node is None:
             if path in self._dirs:
-                return {"path": path, "size": 0, "mtime": datetime.now(UTC), "is_dir": True}
+                return FileStat(
+                    path=path,
+                    size=0,
+                    mtime=datetime.now(UTC),
+                    is_dir=True,
+                )
             raise FileNotFoundError(path)
-        return {"path": path, "size": len(node.content), "mtime": node.mtime, "is_dir": False}
+        return FileStat(path=path, size=len(node.content), mtime=node.mtime, is_dir=False)
 
-    async def readdir(self, path: str, *, timeout: float | None = None) -> list[Any]:
+    async def readdir(self, path: str, *, timeout: float | None = None) -> list[FileEntry]:
         del timeout
         prefix = "" if path in {"", "/", "."} else path.rstrip("/") + "/"
         return [
-            {"name": fp[len(prefix) :], "is_dir": False}
+            FileEntry(name=fp[len(prefix) :], is_dir=False)
             for fp in self._files
             if fp.startswith(prefix) and "/" not in fp[len(prefix) :]
         ]
@@ -303,7 +308,7 @@ class FakeSandbox:
         env: dict[str, str] | None = None,
         stdin: str | None = None,
         timeout: float | None = None,
-    ) -> Any:
-        """Stub: returns an ``ExecResult``-shaped dict with exit_code=0."""
+    ) -> ExecResult:
+        """Stub: returns an :class:`ExecResult` with ``exit_code=0``."""
         del cmd, cwd, env, stdin, timeout
-        return {"exit_code": 0, "stdout": "", "stderr": "", "timed_out": False}
+        return ExecResult(exit_code=0, stdout="", stderr="", timed_out=False)

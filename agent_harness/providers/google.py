@@ -125,7 +125,7 @@ class GoogleProvider:
         timeout: float | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         """Issue a Gemini ``generate_content`` request."""
-        del timeout
+        del timeout  # honored at client construction; per-request override TODO
         if stream:
             iterator = await self._client.aio.models.generate_content_stream(**payload)
             async for chunk in iterator:
@@ -160,7 +160,10 @@ class GeminiModel:
     # ----- message translation ---------------------------------------------
 
     @staticmethod
-    def _block_to_part(block: Any) -> dict[str, Any] | None:
+    def _block_to_part(
+        block: Any,
+        tool_names_by_call_id: dict[str, str] | None = None,
+    ) -> dict[str, Any] | None:
         if isinstance(block, TextBlock):
             return {"text": block.text}
         if isinstance(block, ToolCallBlock):
@@ -171,12 +174,15 @@ class GeminiModel:
                 response_obj: dict[str, Any] = {"result": content}
             else:
                 response_obj = {"result": content}
+            # Gemini's function_response.name is the *tool* name, not the
+            # call id. We reconstruct it by scanning prior assistant
+            # ``ToolCallBlock``s for the matching ``id`` and falling back to
+            # the call id if nothing was found (preserves prior behavior for
+            # callers that happen to set them equal).
+            name = (tool_names_by_call_id or {}).get(block.tool_call_id) or block.tool_call_id
             return {
                 "function_response": {
-                    # Gemini's function_response uses the tool name; we don't
-                    # have it here, so we pass the call id as the name field —
-                    # callers preserve the tool_call_id↔name pairing.
-                    "name": block.tool_call_id,
+                    "name": name,
                     "response": response_obj,
                 }
             }
@@ -186,6 +192,14 @@ class GeminiModel:
 
     @classmethod
     def _messages_to_wire(cls, messages: list[Message]) -> tuple[str | None, list[dict[str, Any]]]:
+        # Build a call_id -> tool_name map from prior assistant ToolCallBlocks
+        # so ToolResultBlocks (which only carry tool_call_id) can be wired
+        # with the function name Gemini's function_response expects.
+        tool_names_by_call_id: dict[str, str] = {}
+        for msg in messages:
+            for b in msg.content:
+                if isinstance(b, ToolCallBlock):
+                    tool_names_by_call_id[b.id] = b.name
         system: str | None = None
         contents: list[dict[str, Any]] = []
         for msg in messages:
@@ -196,7 +210,7 @@ class GeminiModel:
             role = "user" if msg.role in {"user", "tool"} else "model"
             parts: list[dict[str, Any]] = []
             for b in msg.content:
-                part = cls._block_to_part(b)
+                part = cls._block_to_part(b, tool_names_by_call_id)
                 if part is not None:
                     parts.append(part)
             if parts:
@@ -285,7 +299,6 @@ class GeminiModel:
         tool_calls: list[ToolCallBlock] = []
         usage = Usage()
         started = False
-        finalised = False
 
         try:
             iterator = await client.aio.models.generate_content_stream(**payload)
@@ -360,8 +373,6 @@ class GeminiModel:
         final = _build_final_message(text_acc, thinking_acc, tool_calls)
         yield MessageEnd(message_id=message_id, final=final, usage=usage)
         yield ModelEnd(message_id=message_id, usage=usage)
-        finalised = True
-        del finalised  # silence "assigned but never used"
 
     async def compact_messages(self, msgs: list[Message]) -> list[Message]:
         """Gemini does not expose a standalone compaction endpoint."""

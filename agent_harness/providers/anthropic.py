@@ -18,6 +18,7 @@ Example:
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -404,7 +405,6 @@ class AnthropicMessagesModel:
 def _parse_json_args(raw: str) -> dict[str, Any]:
     if not raw:
         return {}
-    import json
 
     try:
         parsed = json.loads(raw)

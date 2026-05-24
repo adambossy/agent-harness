@@ -19,6 +19,7 @@ Example:
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -136,7 +137,7 @@ class OpenAIProvider:
         timeout: float | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         """Issue an OpenAI Responses ``responses.create`` request."""
-        del timeout
+        del timeout  # honored at client construction; per-request override TODO
         if stream:
             async with self._client.responses.stream(**payload) as ctx:
                 async for chunk in ctx:
@@ -169,18 +170,11 @@ class OpenAIResponsesModel:
         self.capabilities = capabilities if capabilities is not None else _CAPS_GPT_5_5
 
     # ----- message translation ---------------------------------------------
-
-    @staticmethod
-    def _block_to_wire(block: Any) -> dict[str, Any] | None:
-        if isinstance(block, TextBlock):
-            return {"type": "input_text", "text": block.text}
-        if isinstance(block, ToolCallBlock):
-            return None  # serialised separately as a top-level function_call item
-        if isinstance(block, ToolResultBlock):
-            return None  # serialised separately as a function_call_output item
-        if isinstance(block, ThinkingBlock):
-            return None  # OpenAI handles reasoning items server-side
-        return None
+    #
+    # Note: there is no per-block ``_block_to_wire`` helper. The Responses API
+    # interleaves tool calls / tool outputs as *top-level* items in the
+    # ``input`` array rather than embedding them in message content, so the
+    # translation lives entirely in ``_messages_to_wire`` below.
 
     @classmethod
     def _messages_to_wire(cls, messages: list[Message]) -> list[dict[str, Any]]:
@@ -200,8 +194,6 @@ class OpenAIResponsesModel:
             # Assistant tool calls: top-level function_call items.
             for b in msg.content:
                 if isinstance(b, ToolCallBlock):
-                    import json
-
                     items.append(
                         {
                             "type": "function_call",
@@ -390,7 +382,6 @@ def _budget_to_effort(budget: int) -> str:
 def _parse_json_args(raw: str | None) -> dict[str, Any]:
     if not raw:
         return {}
-    import json
 
     try:
         parsed = json.loads(raw)

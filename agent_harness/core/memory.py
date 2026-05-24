@@ -107,8 +107,8 @@ class Memory:
 
     id: str
     content: str
+    created_at: datetime
     metadata: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime | None = None
     score: float | None = None
 
 

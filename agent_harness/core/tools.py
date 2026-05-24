@@ -278,9 +278,12 @@ def _build_schema(fn: Callable[..., Any], param_descs: dict[str, str]) -> dict[s
     sig = inspect.signature(fn)
     try:
         hints = get_type_hints(fn)
-    except Exception:
+    except (NameError, AttributeError, TypeError):
         # Forward refs or stringified annotations that can't be resolved at
         # decoration time fall back to whatever is on the signature object.
+        # NameError: unresolved forward ref. AttributeError: stringified
+        # annotation referencing a missing attribute. TypeError: callable
+        # with unhintable signature (e.g. C-implemented).
         hints = {}
     fields: dict[str, tuple[Any, Any]] = {}
     for name, param in sig.parameters.items():

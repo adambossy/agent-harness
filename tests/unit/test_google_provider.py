@@ -125,13 +125,15 @@ def test_messages_to_wire_extracts_system_and_contents() -> None:
             content=[
                 ThinkingBlock(text="t"),
                 TextBlock(text="ok"),
-                ToolCallBlock(id="c1", name="search", arguments={"q": "x"}),
+                # call_id is distinct from the tool name so the test fails
+                # if the adapter pipes the id through as function_response.name.
+                ToolCallBlock(id="call_abc123", name="search", arguments={"q": "x"}),
             ],
             timestamp=_ts(),
         ),
         Message(
             role="tool",
-            content=[ToolResultBlock(tool_call_id="search", content="hit")],
+            content=[ToolResultBlock(tool_call_id="call_abc123", content="hit")],
             timestamp=_ts(),
         ),
     ]
@@ -144,9 +146,26 @@ def test_messages_to_wire_extracts_system_and_contents() -> None:
     fc_part = next(p for p in contents[1]["parts"] if "function_call" in p)
     assert fc_part["function_call"]["name"] == "search"
     assert fc_part["function_call"]["args"] == {"q": "x"}
-    # Tool turn carries function_response.
+    # Tool turn carries function_response with the *tool name*, looked up
+    # from the prior assistant ToolCallBlock by tool_call_id.
     fr_part = next(p for p in contents[2]["parts"] if "function_response" in p)
     assert fr_part["function_response"]["name"] == "search"
+
+
+def test_messages_to_wire_falls_back_to_call_id_when_no_prior_call() -> None:
+    """An orphan ToolResultBlock with no matching ToolCallBlock falls back
+    to passing the call id as the name (legacy behavior)."""
+
+    msgs = [
+        Message(
+            role="tool",
+            content=[ToolResultBlock(tool_call_id="orphan-1", content="hi")],
+            timestamp=_ts(),
+        ),
+    ]
+    _, contents = GeminiModel._messages_to_wire(msgs)
+    fr_part = next(p for p in contents[0]["parts"] if "function_response" in p)
+    assert fr_part["function_response"]["name"] == "orphan-1"
 
 
 def test_build_payload_maps_settings_and_extra() -> None:

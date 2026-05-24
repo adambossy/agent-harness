@@ -42,7 +42,9 @@ def test_fake_model_satisfies_model_protocol() -> None:
 
 
 def test_fake_sandbox_has_nine_method_surface() -> None:
-    """``FakeSandbox`` duck-types the 9-method ``Sandbox`` Protocol."""
+    """``FakeSandbox`` structurally satisfies the 9-method ``Sandbox`` Protocol."""
+
+    from agent_harness.core.sandbox import Sandbox
 
     fs = FakeSandbox()
     required = {
@@ -61,6 +63,29 @@ def test_fake_sandbox_has_nine_method_surface() -> None:
     # Required Protocol attributes
     assert fs.root == "/workspace"
     assert fs.name == "fake-sandbox"
+    assert isinstance(fs, Sandbox)
+
+
+async def test_fake_sandbox_returns_real_dataclasses() -> None:
+    """``stat``/``readdir``/``exec`` return real ``FileStat``/``FileEntry``/``ExecResult``."""
+
+    from agent_harness.core.sandbox import ExecResult, FileEntry, FileStat
+
+    fs = FakeSandbox()
+    await fs.write_file("a.txt", "hi")
+    stat = await fs.stat("a.txt")
+    assert isinstance(stat, FileStat)
+    assert stat.is_dir is False
+    assert stat.size == 2
+
+    entries = await fs.readdir("")
+    assert all(isinstance(e, FileEntry) for e in entries)
+    assert any(e.name == "a.txt" for e in entries)
+
+    result = await fs.exec(["echo", "hi"])
+    assert isinstance(result, ExecResult)
+    assert result.exit_code == 0
+    assert result.timed_out is False
 
 
 # ---------------------------------------------------------------------------

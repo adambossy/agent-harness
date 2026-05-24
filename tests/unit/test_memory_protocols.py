@@ -18,11 +18,11 @@ def _ts() -> datetime:
 
 
 def test_memory_dataclass_defaults_and_fields() -> None:
-    m = Memory(id="m1", content="hello")
+    m = Memory(id="m1", content="hello", created_at=_ts())
     assert m.id == "m1"
     assert m.content == "hello"
     assert m.metadata == {}
-    assert m.created_at is None
+    assert m.created_at == _ts()
     assert m.score is None
 
 

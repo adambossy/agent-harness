@@ -25,6 +25,7 @@ Example:
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -35,9 +36,7 @@ from .errors import ToolError
 from .models import TextBlock
 from .tools import Tool, ToolCall, ToolPolicy, ToolResult, tool
 
-# ---------------------------------------------------------------------------
-# Toolset Protocol
-# ---------------------------------------------------------------------------
+# --- Toolset Protocol ------------------------------------------------------
 
 
 @runtime_checkable
@@ -65,9 +64,7 @@ class Toolset(Protocol):
         ...
 
 
-# ---------------------------------------------------------------------------
-# Helpers shared by every concrete toolset.
-# ---------------------------------------------------------------------------
+# --- Helpers shared by every concrete toolset ------------------------------
 
 
 def _find_tool(tools: list[Tool], name: str) -> Tool:
@@ -109,13 +106,19 @@ async def _invoke(tool_obj: Tool, arguments: dict[str, Any]) -> ToolResult:
         return ToolResult(content=[TextBlock(text=message)], error=message)
     if isinstance(raw, ToolResult):
         return raw
-    text = "" if raw is None else str(raw)
+    # Serialize dict/list returns via ``json.dumps`` (not ``str``) so the
+    # model sees valid JSON, not Python ``repr``. ``default=str`` keeps
+    # non-JSON-native values lossy-but-readable instead of raising.
+    if raw is None:
+        text = ""
+    elif isinstance(raw, dict | list):
+        text = json.dumps(raw, default=str)
+    else:
+        text = str(raw)
     return ToolResult(content=[TextBlock(text=text)])
 
 
-# ---------------------------------------------------------------------------
-# StaticToolset — the default.
-# ---------------------------------------------------------------------------
+# --- StaticToolset (the default) -------------------------------------------
 
 
 @dataclass(slots=True)
@@ -165,17 +168,17 @@ def _resolve_predicate(value: bool | Callable[..., bool], ctx: Any) -> bool:
     return bool(value)
 
 
-# ---------------------------------------------------------------------------
-# Wrappers
-# ---------------------------------------------------------------------------
+# --- Wrappers --------------------------------------------------------------
 
 
 @dataclass(slots=True)
 class PrefixedToolset:
     """Wrap another toolset; prepend ``f"{prefix}__"`` to every tool name.
 
-    Useful for namespacing MCP servers (``"github__search_repos"``) so two
-    sets with overlapping tool names can coexist on one agent.
+    Namespaces MCP servers (``"github__search_repos"``) so two sets with
+    overlapping tool names coexist. ``name`` is the prefix itself —
+    unlike the transparent wrappers below, this one reports its own label
+    rather than delegating to ``self.inner.name``.
 
     Example:
         >>> from agent_harness.core.tools import tool
@@ -231,7 +234,8 @@ class PrefixedToolset:
 class FilteredToolset:
     """Wrap another toolset; expose only tools satisfying ``predicate``.
 
-    The predicate is re-evaluated on every ``list_tools`` call so it can
+    Transparent wrapper: ``name`` delegates to ``self.inner.name``. The
+    predicate is re-evaluated on every ``list_tools`` call so it can
     depend on ``ctx`` (TS7). Calls to filtered-out tools still dispatch
     successfully — the filter is for *visibility*, not *security*; for
     access control wrap with :class:`ApprovalRequiredToolset` or use a
@@ -270,7 +274,8 @@ class FilteredToolset:
 class ApprovalRequiredToolset:
     """Wrap another toolset; force ``policy.needs_approval=True`` on every tool.
 
-    Other policy fields (timeouts, guardrails, ...) are preserved. Useful to
+    Transparent wrapper: ``name`` delegates to ``self.inner.name``. Other
+    policy fields (timeouts, guardrails, ...) are preserved. Useful to
     layer human-in-the-loop approval on top of an otherwise-unguarded set
     (e.g. an MCP server you don't fully trust).
 
@@ -307,11 +312,67 @@ class ApprovalRequiredToolset:
 
 
 @dataclass(slots=True)
+class RenamedToolset:
+    """Wrap another toolset; rename individual tools per a ``rename`` map.
+
+    Transparent wrapper: ``name`` delegates to ``self.inner.name``. Keys
+    are *inner* tool names; values are the *exposed* names. Unmapped
+    tools pass through unchanged. Useful when an MCP server's tool names
+    collide with local conventions.
+
+    Example:
+        >>> from agent_harness.core.tools import tool
+        >>> @tool
+        ... async def search_repos() -> list[str]:
+        ...     '''search'''
+        ...     return []
+        >>> inner = StaticToolset(name="gh", tools=[search_repos])
+        >>> RenamedToolset(inner=inner, rename={"search_repos": "find_repo"}).name
+        'gh'
+    """
+
+    inner: Toolset
+    rename: dict[str, str] = field(default_factory=dict)
+    name: str = field(init=False)
+    _reverse: dict[str, str] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.name = self.inner.name
+        if len(set(self.rename.values())) != len(self.rename):
+            raise ToolError(
+                "RenamedToolset.rename values must be unique",
+                context={"rename": dict(self.rename)},
+            )
+        self._reverse = {new: old for old, new in self.rename.items()}
+
+    async def list_tools(self, ctx: Any) -> list[Tool]:
+        return [
+            Tool(
+                name=self.rename.get(t.name, t.name),
+                description=t.description,
+                schema=t.schema,
+                policy=t.policy,
+                fn=t.fn,
+            )
+            for t in await self.inner.list_tools(ctx)
+        ]
+
+    async def call_tool(self, ctx: Any, call: ToolCall) -> ToolResult:
+        original = self._reverse.get(call.name, call.name)
+        if original == call.name:
+            return await self.inner.call_tool(ctx, call)
+        return await self.inner.call_tool(
+            ctx, ToolCall(id=call.id, name=original, arguments=call.arguments)
+        )
+
+
+@dataclass(slots=True)
 class CachedToolset:
     """Wrap another toolset; cache ``list_tools`` for ``ttl_seconds`` seconds.
 
-    Useful for remote toolsets (e.g. MCP) whose tool catalog rarely changes
-    but is expensive to fetch. ``call_tool`` is always delegated unchanged
+    Transparent wrapper: ``name`` delegates to ``self.inner.name``. Useful
+    for remote toolsets (e.g. MCP) whose tool catalog rarely changes but
+    is expensive to fetch. ``call_tool`` is always delegated unchanged
     (caching results is the loop's job, not the toolset's).
 
     Example:
@@ -349,16 +410,14 @@ class CachedToolset:
         self._cache = None
 
 
-# ---------------------------------------------------------------------------
-# Built-in ToolSearch standard tool.
-# ---------------------------------------------------------------------------
+# --- Built-in ToolSearch standard tool -------------------------------------
 
 
 _DEFERRED_TOOLS: list[Tool] = []
-"""Process-wide registry of deferred tools the ``ToolSearch`` standard tool
-may surface. Populated by :func:`register_deferred_tools`. Wave-3 will move
-this onto ``RunContext`` so it's per-run rather than process-wide; this
-module-level fallback keeps the unit tests self-contained.
+"""Process-wide registry of deferred tools that ``ToolSearch`` may surface.
+Populated by :func:`register_deferred_tools`. XXX(wave-3): scope is the
+*Python process* — Wave-3 moves the catalog onto ``RunContext``. Tests
+use the auto-use fixture in ``tests/conftest.py`` for isolation.
 """
 
 
@@ -430,6 +489,5 @@ async def tool_search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
 
 
 TOOL_SEARCH: Tool = tool_search
-"""The built-in ``ToolSearch`` :class:`Tool`. Always-load by policy; the loop
-surfaces this whenever any tool in the current run carries
-``policy.defer_loading=True``."""
+"""Built-in ``ToolSearch`` :class:`Tool`. Always-load by policy; the loop
+surfaces this whenever a run holds any tool with ``policy.defer_loading=True``."""

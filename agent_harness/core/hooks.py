@@ -29,7 +29,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol, get_args, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .errors import ConfigError
 
@@ -76,11 +76,9 @@ DEFAULT_HOOK_TIMEOUT_SECONDS: float = 30.0
 
 
 class HookResponse(BaseModel):
-    """What a hook returns; the loop interprets ``action`` per event semantics.
+    """What a hook returns; loop interprets ``action`` per event semantics.
 
-    Example:
-        >>> HookResponse(action="deny", reason="no rm").action
-        'deny'
+    Example: ``HookResponse(action="deny", reason="no rm").action == "deny"``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -97,9 +95,7 @@ class HookResponse(BaseModel):
 class HookConfig(BaseModel):
     """Declarative hook config — loaded from settings / skill / frontmatter.
 
-    Example:
-        >>> HookConfig(event="SessionStart", executor="subprocess", command=["echo"]).timeout_seconds
-        30.0
+    Example: ``HookConfig(event="SessionStart", executor="subprocess", command=["echo"]).timeout_seconds == 30.0``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -112,32 +108,63 @@ class HookConfig(BaseModel):
     callable_ref: str | None = None
     timeout_seconds: float = DEFAULT_HOOK_TIMEOUT_SECONDS
     blocking: bool = True
-    source: Literal["policy", "user", "project", "local", "skill", "agent"] = "user"
+    # ``source`` is *loader-owned* (HK7): frozen, defaults to ``None``, set
+    # only via :meth:`with_source` by the Wave-3 loader. Direct construction
+    # with a non-``None`` value raises :class:`ConfigError`.
+    source: Literal["policy", "user", "project", "local", "skill", "agent"] | None = Field(
+        default=None, frozen=True
+    )
 
     @model_validator(mode="after")
     def _check(self) -> HookConfig:
+        ctx = {"event": self.event}
         match self.executor:
             case "subprocess":
                 if not self.command:
-                    raise ConfigError(
-                        "subprocess hook requires non-empty command",
-                        context={"event": self.event},
-                    )
+                    raise ConfigError("subprocess hook requires non-empty command", context=ctx)
             case "http":
                 if not self.url:
-                    raise ConfigError("http hook requires url", context={"event": self.event})
+                    raise ConfigError("http hook requires url", context=ctx)
             case "in_process":
                 if not self.callable_ref or ":" not in self.callable_ref:
                     raise ConfigError(
                         "in_process hook requires 'module:func' callable_ref",
-                        context={"event": self.event, "ref": self.callable_ref},
+                        context={**ctx, "ref": self.callable_ref},
                     )
         if self.timeout_seconds <= 0:
             raise ConfigError(
                 "timeout_seconds must be positive",
                 context={"timeout_seconds": self.timeout_seconds},
             )
+        if self.source is not None:
+            raise ConfigError(
+                "HookConfig.source is loader-owned; use HookConfig.with_source(...)",
+                context={**ctx, "source": self.source},
+            )
         return self
+
+    @classmethod
+    def with_source(
+        cls,
+        base: HookConfig,
+        *,
+        source: Literal["policy", "user", "project", "local", "skill", "agent"],
+    ) -> HookConfig:
+        """Return a copy of ``base`` with ``source`` stamped (HK7 loader path).
+
+        The *only* sanctioned write path for ``HookConfig.source``. Uses
+        ``model_construct`` so the loader-owned validator (which rejects
+        user-supplied sources) is bypassed.
+
+        Example:
+            >>> base = HookConfig(event="Stop", executor="subprocess", command=["true"])
+            >>> HookConfig.with_source(base, source="user").source
+            'user'
+        """
+
+        data = base.model_dump()
+        data["source"] = source
+        return cls.model_construct(**data)
 
 
 # --- Executor Protocol + three built-ins -------------------------------------
@@ -145,19 +172,10 @@ class HookConfig(BaseModel):
 
 @runtime_checkable
 class HookExecutor(Protocol):
-    """A way to invoke a hook.
-
-    Example:
-        >>> isinstance(SubprocessExecutor(), HookExecutor)
-        True
-    """
+    """A way to invoke a hook. Example: ``isinstance(SubprocessExecutor(), HookExecutor)``."""
 
     async def execute(
-        self,
-        config: HookConfig,
-        payload: dict[str, Any],
-        *,
-        timeout: float | None = None,
+        self, config: HookConfig, payload: dict[str, Any], *, timeout: float | None = None
     ) -> HookResponse: ...
 
 
@@ -184,12 +202,7 @@ def _parse_response(raw: str | bytes | dict[str, Any]) -> HookResponse:
 
 
 class SubprocessExecutor:
-    """Subprocess (HK8): JSON on stdin, JSON on stdout. Non-zero exit → ``deny``.
-
-    Example:
-        >>> SubprocessExecutor().__class__.__name__
-        'SubprocessExecutor'
-    """
+    """Subprocess (HK8): JSON on stdin, JSON on stdout. Non-zero exit → ``deny``."""
 
     async def execute(
         self,
@@ -224,14 +237,7 @@ class SubprocessExecutor:
 
 
 class HttpExecutor:
-    """HTTP (HK9): POST JSON, parse JSON. Non-2xx → ``deny``.
-
-    Uses ``httpx`` (an optional dep under the ``fly`` extra); imported lazily.
-
-    Example:
-        >>> HttpExecutor().__class__.__name__
-        'HttpExecutor'
-    """
+    """HTTP (HK9): POST JSON, parse JSON. Non-2xx → ``deny``. Uses ``httpx`` (lazy import)."""
 
     async def execute(
         self,
@@ -271,10 +277,6 @@ class InProcessExecutor:
     """In-process (HK10): import ``module:function`` and call it (sync or async).
 
     Exceptions become ``ignore`` so a buggy hook never crashes the loop (HK4).
-
-    Example:
-        >>> InProcessExecutor().__class__.__name__
-        'InProcessExecutor'
     """
 
     async def execute(
@@ -312,15 +314,17 @@ class InProcessExecutor:
 
 # --- Registry ----------------------------------------------------------------
 
-# Resolution order: most general → most specific (HK7).
+# Resolution order (HK7): most general → most specific. Hooks without a
+# loader-set ``source`` sort between policy and user (``_UNSOURCED_KEY = 1``)
+# so direct callers and tests see deterministic ordering.
 _SOURCE_ORDER: dict[str, int] = {
-    "policy": 0,
-    "user": 1,
-    "project": 2,
-    "local": 3,
-    "skill": 4,
-    "agent": 5,
-}
+    "policy": 0, "user": 1, "project": 2, "local": 3, "skill": 4, "agent": 5,
+}  # fmt: skip
+_UNSOURCED_KEY: int = 1
+
+
+def _resolution_key(c: HookConfig) -> int:
+    return _UNSOURCED_KEY if c.source is None else _SOURCE_ORDER[c.source]
 
 
 def _matches(matcher: dict[str, Any] | None, payload: dict[str, Any]) -> bool:
@@ -331,10 +335,9 @@ def _matches(matcher: dict[str, Any] | None, payload: dict[str, Any]) -> bool:
         if key not in payload:
             return False
         actual = payload[key]
-        if isinstance(expected, list):
-            if actual not in expected:
-                return False
-        elif actual != expected:
+        if isinstance(expected, list) and actual not in expected:
+            return False
+        if not isinstance(expected, list) and actual != expected:
             return False
     return True
 
@@ -349,10 +352,7 @@ _DEFAULT_EXECUTORS: dict[str, Callable[[], HookExecutor]] = {
 class HookRegistry:
     """Loads hooks at construction (HK12) and fires them at lifecycle points.
 
-    Example:
-        >>> import asyncio
-        >>> asyncio.run(HookRegistry([]).fire("Stop", {})).action
-        'ignore'
+    Example: ``asyncio.run(HookRegistry([]).fire("Stop", {})).action == "ignore"``.
     """
 
     def __init__(
@@ -366,7 +366,7 @@ class HookRegistry:
         for cfg in configs:
             self._by_event.setdefault(cfg.event, []).append(cfg)
         for bucket in self._by_event.values():
-            bucket.sort(key=lambda c: _SOURCE_ORDER.get(c.source, 99))
+            bucket.sort(key=_resolution_key)
         if executors is None:
             executors = {name: factory() for name, factory in _DEFAULT_EXECUTORS.items()}
         self._executors: dict[str, HookExecutor] = executors
@@ -388,10 +388,12 @@ class HookRegistry:
             raise ConfigError(f"unknown HookEvent {event!r}", context={"event": event})
         hooks = self._by_event.get(event, [])
         if not hooks:
-            return HookResponse(action="ignore")
+            return HookResponse(action="ignore", reason="no hooks configured")
 
         current = dict(payload)
-        aggregate = HookResponse(action="ignore")
+        # Start with a sentinel reason; tightened below if every hook
+        # either ignored or short-circuited.
+        aggregate = HookResponse(action="ignore", reason="all hooks abstained")
         modified = False
         last_ctx: str | None = None
 
@@ -463,23 +465,34 @@ class HookRegistry:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
+    async def aclose(self, *, timeout: float = 5.0) -> None:
+        """Cancel and await any in-flight non-blocking hook tasks (idempotent)."""
+        if not self._background:
+            return
+        pending = list(self._background)
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(*pending, return_exceptions=True), timeout=timeout
+            )
+        self._background.clear()
+
     async def _report(self, message: str) -> None:
         if self._error_sink is None:
             return
-        result = self._error_sink(message)
-        if inspect.isawaitable(result):
-            await result
+        try:
+            result = self._error_sink(message)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            # The error sink must never break the loop (HK4); swallow.
+            pass
 
 
 __all__ = [
-    "DEFAULT_HOOK_TIMEOUT_SECONDS",
-    "HOOK_EVENT_NAMES",
-    "HookConfig",
-    "HookEvent",
-    "HookExecutor",
-    "HookRegistry",
-    "HookResponse",
-    "HttpExecutor",
-    "InProcessExecutor",
-    "SubprocessExecutor",
-]
+    "DEFAULT_HOOK_TIMEOUT_SECONDS", "HOOK_EVENT_NAMES",
+    "HookConfig", "HookEvent", "HookExecutor", "HookRegistry", "HookResponse",
+    "HttpExecutor", "InProcessExecutor", "SubprocessExecutor",
+]  # fmt: skip

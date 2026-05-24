@@ -122,11 +122,29 @@ async def test_tool_search_invocable_via_static_toolset() -> None:
         ctx=None, call=ToolCall(id="c1", name="ToolSearch", arguments={"query": "search"})
     )
     assert result.error is None
-    # The wrapped result content is text (str repr of the list); make sure it's
-    # not empty and references the matched tool name.
+    # The wrapped result content is text; make sure it's not empty and
+    # references the matched tool name.
     block = result.content[0]
     assert isinstance(block, TextBlock)
     assert "search_repos" in block.text
+
+
+async def test_tool_search_result_text_is_valid_json() -> None:
+    """Structured returns (list/dict) are serialized via ``json.dumps``, not
+    Python's ``repr`` — the model gets valid JSON it can re-parse."""
+
+    register_deferred_tools([fetch_url, search_repos])
+    ts = StaticToolset(name="builtin", tools=[TOOL_SEARCH])
+    result = await ts.call_tool(
+        ctx=None, call=ToolCall(id="c1", name="ToolSearch", arguments={"query": "search"})
+    )
+    block = result.content[0]
+    assert isinstance(block, TextBlock)
+    # json.loads must round-trip cleanly — repr() would use single quotes and
+    # Python's True/False, both of which break json.loads.
+    parsed = json.loads(block.text)
+    assert isinstance(parsed, list)
+    assert all("name" in entry for entry in parsed)
 
 
 def test_register_deferred_tools_is_idempotent() -> None:

@@ -15,6 +15,7 @@ from agent_harness.core.toolsets import (
     CachedToolset,
     FilteredToolset,
     PrefixedToolset,
+    RenamedToolset,
     StaticToolset,
     Toolset,
 )
@@ -231,3 +232,57 @@ async def test_wrappers_compose() -> None:
 def test_read_tool_function_is_coroutine() -> None:
     """Sanity check: the underlying ``fn`` for ``_read`` is an async function."""
     assert asyncio.iscoroutinefunction(_read.fn)
+
+
+# --- RenamedToolset ---------------------------------------------------------
+
+
+async def test_renamed_toolset_renames_listed_tools() -> None:
+    inner = StaticToolset(name="fs", tools=[_read, _write])
+    renamed = RenamedToolset(inner=inner, rename={"_read": "read_file"})
+    listed = await renamed.list_tools(ctx=None)
+    names = sorted(t.name for t in listed)
+    # ``_read`` is exposed as ``read_file``; ``_write`` passes through unchanged.
+    assert names == ["_write", "read_file"]
+
+
+async def test_renamed_toolset_delegates_name_to_inner() -> None:
+    inner = StaticToolset(name="fs", tools=[_read])
+    renamed = RenamedToolset(inner=inner, rename={"_read": "read_file"})
+    assert renamed.name == "fs"
+
+
+async def test_renamed_toolset_dispatches_under_exposed_name() -> None:
+    inner = StaticToolset(name="fs", tools=[_read])
+    renamed = RenamedToolset(inner=inner, rename={"_read": "read_file"})
+    result = await renamed.call_tool(
+        ctx=None,
+        call=ToolCall(id="c1", name="read_file", arguments={"path": "/a"}),
+    )
+    assert isinstance(result.content[0], TextBlock)
+    assert result.content[0].text == "contents of /a"
+
+
+async def test_renamed_toolset_passes_through_unrenamed_tool() -> None:
+    inner = StaticToolset(name="fs", tools=[_read])
+    renamed = RenamedToolset(inner=inner, rename={"other": "alias"})
+    listed = await renamed.list_tools(ctx=None)
+    assert [t.name for t in listed] == ["_read"]
+    # Calling by the (unchanged) original name still dispatches correctly.
+    result = await renamed.call_tool(
+        ctx=None,
+        call=ToolCall(id="c1", name="_read", arguments={"path": "/a"}),
+    )
+    assert isinstance(result.content[0], TextBlock)
+
+
+def test_renamed_toolset_rejects_duplicate_targets() -> None:
+    inner = StaticToolset(name="fs", tools=[_read, _write])
+    with pytest.raises(ToolError, match="must be unique"):
+        RenamedToolset(inner=inner, rename={"_read": "x", "_write": "x"})
+
+
+def test_renamed_toolset_satisfies_protocol() -> None:
+    inner = StaticToolset(name="fs", tools=[_read])
+    renamed = RenamedToolset(inner=inner, rename={})
+    assert isinstance(renamed, Toolset)

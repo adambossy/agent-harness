@@ -2,6 +2,14 @@
 
 Covers :class:`TokenBudgetCap`, :class:`DedupFileReads`, :class:`HistorySnip` —
 happy paths, idempotency, cache-preservation (HP4), and error paths.
+
+The ``# type: ignore[union-attr]`` comments scattered through this file
+are intentional: the assertions index into ``Message.content`` (a list of
+``ContentBlock = TextBlock | ToolResultBlock | ToolCallBlock | ...``) and
+read ``.content`` / ``.text`` on the *narrowed* block. mypy can't prove
+the right variant at the index without a runtime ``isinstance`` check,
+and adding one per assertion would obscure the test's intent. The
+``[union-attr]`` code documents what is being suppressed.
 """
 
 from __future__ import annotations
