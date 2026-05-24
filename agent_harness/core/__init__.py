@@ -5,6 +5,7 @@ Concrete adapters (Providers, Sandboxes, Sessions, ...) ship in sibling
 sub-packages and import *from* core; core itself never imports them.
 """
 
+from .agent import Agent, RunContext, RunResult
 from .errors import (
     AgentHarnessError,
     BudgetExceededError,
@@ -142,6 +143,7 @@ from .toolsets import (
 )
 
 __all__ = [
+    "Agent",
     "CHARS_PER_TOKEN",
     "COLLAPSE_MARKER_PREFIX",
     "DEFAULT_QUEUE_MAXSIZE",
@@ -222,7 +224,9 @@ __all__ = [
     "Provider",
     "ProviderEvent",
     "ProviderSideCompaction",
+    "RunContext",
     "RunEnd",
+    "RunResult",
     "RunStart",
     "RunStateSnapshot",
     "Sandbox",

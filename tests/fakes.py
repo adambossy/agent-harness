@@ -24,7 +24,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from agent_harness.core.events import (
     MessageDelta,
@@ -312,3 +312,24 @@ class FakeSandbox:
         """Stub: returns an :class:`ExecResult` with ``exit_code=0``."""
         del cmd, cwd, env, stdin, timeout
         return ExecResult(exit_code=0, stdout="", stderr="", timed_out=False)
+
+
+# --- helpers ---------------------------------------------------------------
+
+
+def make_model(*turns: FakeTurn, provider: Provider | None = None) -> Any:
+    """Construct a :class:`FakeModel` typed as :class:`Model` for mypy.
+
+    ``FakeModel.request`` is an async generator function whose runtime shape
+    is ``AsyncIterator``; the :class:`Model` Protocol declares it as
+    ``async def -> AsyncIterator``. The two are runtime-compatible but mypy
+    can't bridge them, so we cast to ``Any`` (still satisfies the structural
+    Protocol check at runtime).
+
+    Example:
+        >>> isinstance(make_model(FakeTurn(text="hi")), FakeModel)
+        True
+    """
+    from agent_harness.core.models import Model
+
+    return cast(Model, FakeModel(script=list(turns), provider=provider))
