@@ -282,8 +282,17 @@ class OpenAIResponsesModel:
         text_acc = ""
         thinking_acc = ""
         in_thinking = False
+        # OpenAI Responses function-call items carry two IDs:
+        #   item.id      — the output-item id; what delta/done events reference
+        #                  via ``item_id``.
+        #   item.call_id — the tool-call id we surface publicly (e.g.
+        #                  ``call_abc123``); also the id the model expects on
+        #                  the following ``function_call_output`` turn.
+        # Internal accumulators are keyed by item.id (so delta lookups land);
+        # tool_public_ids maps item.id -> the public call_id we emit.
         tool_args: dict[str, str] = {}
         tool_names: dict[str, str] = {}
+        tool_public_ids: dict[str, str] = {}
         usage = Usage()
         finalised = False
 
@@ -321,29 +330,39 @@ class OpenAIResponsesModel:
                         item = getattr(ev, "item", None)
                         itype = getattr(item, "type", None)
                         if itype == "function_call":
-                            call_id = getattr(item, "call_id", "") or getattr(item, "id", "") or ""
+                            # Key accumulators by item.id so delta events find
+                            # the right slot; remember item.call_id for public
+                            # emission.
+                            item_id = getattr(item, "id", "") or ""
+                            public_call_id = getattr(item, "call_id", "") or item_id
                             name = getattr(item, "name", "") or ""
-                            tool_names[call_id] = name
-                            tool_args.setdefault(call_id, "")
-                            yield ToolCallStart(tool_call_id=call_id, tool_name=name)
+                            tool_names[item_id] = name
+                            tool_args.setdefault(item_id, "")
+                            tool_public_ids[item_id] = public_call_id
+                            yield ToolCallStart(tool_call_id=public_call_id, tool_name=name)
                     elif ev_type == "response.function_call_arguments.delta":
-                        call_id = getattr(ev, "call_id", "") or getattr(ev, "item_id", "") or ""
+                        item_id = getattr(ev, "item_id", "") or getattr(ev, "call_id", "") or ""
                         chunk = getattr(ev, "delta", "") or ""
-                        tool_args[call_id] = tool_args.get(call_id, "") + chunk
-                        yield ToolCallDelta(tool_call_id=call_id, arguments_delta=chunk)
+                        tool_args[item_id] = tool_args.get(item_id, "") + chunk
+                        yield ToolCallDelta(
+                            tool_call_id=tool_public_ids.get(item_id, item_id),
+                            arguments_delta=chunk,
+                        )
                     elif ev_type == "response.function_call_arguments.done":
-                        call_id = getattr(ev, "call_id", "") or getattr(ev, "item_id", "") or ""
-                        raw = getattr(ev, "arguments", None) or tool_args.get(call_id, "")
+                        item_id = getattr(ev, "item_id", "") or getattr(ev, "call_id", "") or ""
+                        raw = getattr(ev, "arguments", None) or tool_args.get(item_id, "")
                         args = _parse_json_args(raw)
                         yield ToolCallEnd(
-                            tool_call_id=call_id,
-                            tool_name=tool_names.get(call_id, ""),
+                            tool_call_id=tool_public_ids.get(item_id, item_id),
+                            tool_name=tool_names.get(item_id, ""),
                             arguments=args,
                         )
                     elif ev_type == "response.completed":
                         resp = getattr(ev, "response", None)
                         usage = _usage_from(resp) or usage
-                        final = _build_final_message(text_acc, thinking_acc, tool_names, tool_args)
+                        final = _build_final_message(
+                            text_acc, thinking_acc, tool_names, tool_args, tool_public_ids
+                        )
                         yield MessageEnd(message_id=message_id, final=final, usage=usage)
                         yield ModelEnd(message_id=message_id, usage=usage)
                         finalised = True
@@ -357,7 +376,9 @@ class OpenAIResponsesModel:
             ) from exc
 
         if not finalised:
-            final = _build_final_message(text_acc, thinking_acc, tool_names, tool_args)
+            final = _build_final_message(
+                text_acc, thinking_acc, tool_names, tool_args, tool_public_ids
+            )
             yield MessageEnd(message_id=message_id, final=final, usage=usage)
             yield ModelEnd(message_id=message_id, usage=usage)
 
@@ -397,15 +418,19 @@ def _build_final_message(
     thinking: str,
     tool_names: dict[str, str],
     tool_args: dict[str, str],
+    tool_public_ids: dict[str, str] | None = None,
 ) -> Message:
     blocks: list[Any] = []
     if thinking:
         blocks.append(ThinkingBlock(text=thinking))
     if text:
         blocks.append(TextBlock(text=text))
-    for call_id, name in tool_names.items():
-        args = _parse_json_args(tool_args.get(call_id, ""))
-        blocks.append(ToolCallBlock(id=call_id, name=name, arguments=args))
+    for item_id, name in tool_names.items():
+        args = _parse_json_args(tool_args.get(item_id, ""))
+        # ToolCallBlock.id must be the *public* call_id (what the next turn's
+        # function_call_output references), not the internal item.id.
+        public_id = (tool_public_ids or {}).get(item_id, item_id)
+        blocks.append(ToolCallBlock(id=public_id, name=name, arguments=args))
     return Message(role="assistant", content=blocks, timestamp=_now())
 
 
