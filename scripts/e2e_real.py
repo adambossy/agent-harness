@@ -35,6 +35,7 @@ from agent_harness.providers.google import GeminiModel, GoogleProvider
 from agent_harness.providers.openai import OpenAIProvider, OpenAIResponsesModel
 from agent_harness.sandboxes.inprocess import InProcessSandbox
 from agent_harness.sessions.inmemory import InMemorySession
+from agent_harness.tracing.console import ConsoleSubscriber
 
 
 def make_model_from_env() -> tuple[object, object, str]:
@@ -119,7 +120,7 @@ async def main() -> int:
         )
 
         collected: list = []
-        # Subscribe BEFORE creating the task so the queue is registered before
+        # Subscribe BEFORE creating tasks so the queue is registered before
         # agent.run starts publishing — otherwise RunStart/PrepareTurn etc. are
         # racy and may be lost.
         sub = bus.subscribe()
@@ -129,6 +130,13 @@ async def main() -> int:
                 collected.append(ev)
 
         collector = asyncio.create_task(collect())
+
+        # Live console output of every event as it fires.
+        console = ConsoleSubscriber(bus, color=True, timestamps=True)
+        console_task = console.start()
+
+        print()
+        print("─── live event stream ───────────────────────────────────────────")
 
         t0 = time.perf_counter()
         result = await agent.run(prompt="What's in foo.txt?", event_bus=bus)
@@ -140,6 +148,11 @@ async def main() -> int:
             await asyncio.wait_for(collector, timeout=2.0)
         except TimeoutError:
             collector.cancel()
+        try:
+            await asyncio.wait_for(console_task, timeout=2.0)
+        except TimeoutError:
+            console_task.cancel()
+        print("─── end live event stream ───────────────────────────────────────")
 
         # ─── Render ─────────────────────────────────────────────────
         print("=" * 72)

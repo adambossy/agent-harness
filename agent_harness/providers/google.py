@@ -156,18 +156,33 @@ class GeminiModel:
         self.name = name
         self.provider = provider
         self.capabilities = capabilities if capabilities is not None else _CAPS_GEMINI_3_5_FLASH
+        # Per-model cache of Gemini's per-function-call thought_signature bytes,
+        # keyed by canonical ToolCallBlock.id (our `call_id`). Required: when we
+        # ship an assistant message containing a function_call back to Gemini in
+        # the next turn, the original thought_signature MUST be on that part or
+        # the API rejects with 400 ("missing a thought_signature"). The model
+        # instance persists across the agent run so the cache stays valid for
+        # the run's full duration.
+        self._thought_signatures: dict[str, bytes] = {}
 
     # ----- message translation ---------------------------------------------
 
-    @staticmethod
     def _block_to_part(
+        self,
         block: Any,
         tool_names_by_call_id: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         if isinstance(block, TextBlock):
             return {"text": block.text}
         if isinstance(block, ToolCallBlock):
-            return {"function_call": {"name": block.name, "args": block.arguments}}
+            part: dict[str, Any] = {"function_call": {"name": block.name, "args": block.arguments}}
+            # Gemini 3.5+ requires the original thought_signature on every
+            # function_call part we send back. Pulled from the per-model cache
+            # populated when we first saw this call_id in a streaming response.
+            sig = self._thought_signatures.get(block.id)
+            if sig:
+                part["thought_signature"] = sig
+            return part
         if isinstance(block, ToolResultBlock):
             content = block.content
             if isinstance(content, str):
@@ -190,8 +205,7 @@ class GeminiModel:
             return {"text": block.text, "thought": True}
         return None
 
-    @classmethod
-    def _messages_to_wire(cls, messages: list[Message]) -> tuple[str | None, list[dict[str, Any]]]:
+    def _messages_to_wire(self, messages: list[Message]) -> tuple[str | None, list[dict[str, Any]]]:
         # Build a call_id -> tool_name map from prior assistant ToolCallBlocks
         # so ToolResultBlocks (which only carry tool_call_id) can be wired
         # with the function name Gemini's function_response expects.
@@ -210,7 +224,7 @@ class GeminiModel:
             role = "user" if msg.role in {"user", "tool"} else "model"
             parts: list[dict[str, Any]] = []
             for b in msg.content:
-                part = cls._block_to_part(b, tool_names_by_call_id)
+                part = self._block_to_part(b, tool_names_by_call_id)
                 if part is not None:
                     parts.append(part)
             if parts:
@@ -345,6 +359,12 @@ class GeminiModel:
                             # google-genai represents id as fcall.id (optional).
                             call_id = getattr(fcall, "id", None) or f"call-{len(tool_calls)}"
                             args_dict = dict(args) if not isinstance(args, dict) else args
+                            # Capture thought_signature (lives on the part next
+                            # to function_call) for the round-trip back to
+                            # Gemini in the next turn.
+                            sig = getattr(part, "thought_signature", None)
+                            if sig:
+                                self._thought_signatures[call_id] = sig
                             yield ToolCallStart(tool_call_id=call_id, tool_name=name)
                             yield ToolCallEnd(
                                 tool_call_id=call_id,

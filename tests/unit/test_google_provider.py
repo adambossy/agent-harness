@@ -137,7 +137,8 @@ def test_messages_to_wire_extracts_system_and_contents() -> None:
             timestamp=_ts(),
         ),
     ]
-    system, contents = GeminiModel._messages_to_wire(msgs)
+    m = GeminiModel(provider=GoogleProvider(client=MagicMock()))
+    system, contents = m._messages_to_wire(msgs)
     assert system == "be brief"
     # user → role=user, assistant → role=model, tool → role=user.
     roles = [c["role"] for c in contents]
@@ -163,7 +164,8 @@ def test_messages_to_wire_falls_back_to_call_id_when_no_prior_call() -> None:
             timestamp=_ts(),
         ),
     ]
-    _, contents = GeminiModel._messages_to_wire(msgs)
+    m = GeminiModel(provider=GoogleProvider(client=MagicMock()))
+    _, contents = m._messages_to_wire(msgs)
     fr_part = next(p for p in contents[0]["parts"] if "function_response" in p)
     assert fr_part["function_response"]["name"] == "orphan-1"
 
