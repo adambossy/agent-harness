@@ -21,3 +21,17 @@ repos:
         args: [--maxkb=500]
       - id: mixed-line-ending
         args: [--fix=lf]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        # Use the project's own config (pyproject.toml: [tool.mypy])
+        args: [--config-file=pyproject.toml]
+        # Type stubs / runtime deps mypy needs to import successfully.
+        additional_dependencies:
+          - pydantic>=2.10
+          - pydantic-graph>=0.0.20
+          - pytest>=8.0
+        # Mypy resolves modules itself; pass nothing on the command line.
+        pass_filenames: false

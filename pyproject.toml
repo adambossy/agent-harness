@@ -30,7 +30,7 @@ dev = [
     "pytest-cov>=5.0",
     "pre-commit>=4.0",
     "ruff>=0.7",
-    "pyright>=1.1.380",
+    "mypy>=1.13",
 ]
 
 [build-system]
@@ -85,9 +85,36 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 
-# ─── pyright ──────────────────────────────────────────────────────────────────
-[tool.pyright]
-include = ["agent_harness", "tests"]
-pythonVersion = "3.13"
-typeCheckingMode = "standard"
-strict = ["agent_harness/core"]
+# ─── mypy: strict type checking project-wide ─────────────────────────────────
+[tool.mypy]
+python_version = "3.13"
+files = ["agent_harness", "tests"]
+strict = true
+# Explicit (redundant under strict=true, but documents intent):
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_no_return = true
+warn_unreachable = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+disallow_subclassing_any = true
+check_untyped_defs = true
+no_implicit_optional = true
+no_implicit_reexport = true
+strict_equality = true
+# Show error codes in messages for easier triage / targeted ignores
+show_error_codes = true
+pretty = true
+
+# Tests may have unannotated fixtures; otherwise still strict.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_decorators = false
+
+# Third-party libs without type stubs at v0.0.1:
+[[tool.mypy.overrides]]
+module = ["modal.*", "pgvector.*", "mcp.*"]
+ignore_missing_imports = true

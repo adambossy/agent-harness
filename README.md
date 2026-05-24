@@ -40,7 +40,7 @@ tests/
 ## Coding standards
 
 - Python 3.13, async-first.
-- Strict typing: `pyright` strict on `agent_harness/core/`; standard elsewhere.
+- **Strict typing project-wide**: `mypy --strict` over `agent_harness/` and `tests/`. Pre-commit enforces.
 - Formatting + linting: `ruff` (config in `pyproject.toml`). Pre-commit enforces.
 - Tests: `pytest` + `pytest-asyncio`. Use `FakeModel` + `InMemorySession` for integration tests.
 - Don't import a concrete `Provider`/`Sandbox`/`Session` from `core/`. Only Protocols.
