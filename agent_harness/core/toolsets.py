@@ -90,16 +90,22 @@ async def _invoke(tool_obj: Tool, arguments: dict[str, Any]) -> ToolResult:
     """Invoke ``tool_obj.fn`` and wrap its return value as a :class:`ToolResult`.
 
     Sync functions are called directly; async functions are awaited. Bodies
-    that already return a ``ToolResult`` are forwarded unchanged. Any other
-    return value is wrapped in a single :class:`TextBlock` via ``str(...)``.
-    Raised exceptions become an errored :class:`ToolResult` (the policy-level
-    ``failure_error_function`` shapes the visible message).
+    returning a :class:`ToolResult` pass through; other returns are wrapped
+    in a single :class:`TextBlock`. Raised exceptions become an errored
+    :class:`ToolResult` (the policy-level ``failure_error_function`` shapes
+    the message) — *except* ``NestedInterruption`` (Wave-5 subagent pause)
+    which propagates so ``ToolDispatch`` can roll the child's approvals up.
     """
+    # Local import keeps toolsets.py free of subagent module-init dependencies.
+    from .subagents import NestedInterruption
+
     fn = tool_obj.fn
     try:
         raw: Any = fn(**arguments)
         if isinstance(raw, Awaitable):
             raw = await raw
+    except NestedInterruption:
+        raise
     except Exception as exc:
         formatter = tool_obj.policy.failure_error_function
         message = formatter(exc) if formatter is not None else f"{type(exc).__name__}: {exc}"

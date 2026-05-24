@@ -326,19 +326,62 @@ class ToolDispatch(Node[RunContext[Any], None, RunResult[Any]]):
                 ToolExecEnd(tool_call_id=call.id, result=results[call.id], error=reason)
             )
 
+        # Local import (cycle-safe): ``NestedInterruption`` is raised by
+        # ``Agent.as_tool``'s wrapper when a subagent has pending approvals
+        # (AT3). We catch it here and roll the child's approvals into the
+        # parent's ``pending_approvals``.
+        from .subagents import NestedInterruption
+
         parallel = [(c, t) for (c, t) in approved if is_concurrency_safe(t, rc)]
         serial = [(c, t) for (c, t) in approved if not is_concurrency_safe(t, rc)]
 
+        nested: list[NestedInterruption] = []
+
+        async def _safe_execute(call: ToolCall, t: Tool) -> ToolResult | NestedInterruption:
+            try:
+                return await execute_tool(rc, call, t)
+            except NestedInterruption as exc:
+                return exc
+
         if parallel:
-            async with asyncio.TaskGroup() as tg:
-                tasks: list[tuple[ToolCall, asyncio.Task[ToolResult]]] = [
-                    (call, tg.create_task(execute_tool(rc, call, t))) for call, t in parallel
-                ]
-            for call, task in tasks:
-                results[call.id] = task.result()
+            par_results = await asyncio.gather(*(_safe_execute(call, t) for call, t in parallel))
+            for (call, _), out in zip(parallel, par_results, strict=True):
+                if isinstance(out, NestedInterruption):
+                    nested.append(out)
+                else:
+                    results[call.id] = out
 
         for call, t in serial:
-            results[call.id] = await execute_tool(rc, call, t)
+            out = await _safe_execute(call, t)
+            if isinstance(out, NestedInterruption):
+                nested.append(out)
+            else:
+                results[call.id] = out
+
+        # If any sub-call paused, roll its approvals into the parent's
+        # pending list and exit at this turn's boundary as an interruption
+        # (AT3). Each child's tool_call_id (the *parent-side* ID) plus its
+        # nested approvals + run-state are preserved so a future resume
+        # path can route the user's decision back to the right child.
+        if nested:
+            child_reqs: list[ApprovalRequest] = []
+            for n in nested:
+                child_reqs.extend(n.pending_approvals)
+            rc.pending_approvals = child_reqs
+            rc.pending_tool_calls = [c for c, _ in approved if c.id not in results]
+            await rc.event_bus.publish(ApprovalRequested(requests=child_reqs))
+            interruption = make_interruption(rc)
+            await persist_snapshot(rc, current_node="ToolDispatch")
+            await rc.event_bus.publish(NodeExit(node="ToolDispatch", next=None, interrupted=True))
+            return End(
+                RunResult(
+                    output=None,
+                    messages=list(rc.messages),
+                    pending_approvals=interruption.pending_approvals,
+                    run_state=interruption.run_state,
+                    usage=rc.usage.model_copy(),
+                )
+            )
 
         result_blocks = [
             ToolResultBlock(tool_call_id=call.id, content=content_to_text(results[call.id]))

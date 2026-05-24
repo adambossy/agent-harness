@@ -14,7 +14,13 @@ from typing import Any, cast
 
 from .events import ToolExecEnd, ToolExecStart
 from .models import Message, TextBlock
-from .run_context import RunContext, RunResult, snapshot_from_ctx
+from .run_context import (
+    RunContext,
+    RunResult,
+    reset_current_run_ctx,
+    set_current_run_ctx,
+    snapshot_from_ctx,
+)
 from .tools import Tool, ToolCall, ToolResult
 
 # --- Hook integration ------------------------------------------------------
@@ -223,18 +229,42 @@ async def execute_tool(rc: RunContext[Any], call: ToolCall, t: Tool) -> ToolResu
     )
     ts = await find_toolset(rc, call.name)
     timeout = t.policy.timeout_seconds
+    # NestedInterruption (raised by ``Agent.as_tool``'s wrapper when the
+    # child has pending approvals) must propagate up to ``ToolDispatch``
+    # so the parent can roll those approvals into its own pending list
+    # (AT3). Local import to avoid pulling subagents into module-init time.
+    from .subagents import NestedInterruption
+
+    token = set_current_run_ctx(rc)
     try:
-        if ts is None:
-            raise RuntimeError(f"no toolset owns tool {call.name!r}")
-        coro = ts.call_tool(rc, ToolCall(id=call.id, name=call.name, arguments=args))
-        result = await (asyncio.wait_for(coro, timeout=timeout) if timeout is not None else coro)
-    except TimeoutError:
-        msg = f"tool {call.name!r} timed out after {timeout}s"
-        result = ToolResult(content=[TextBlock(text=msg)], error=msg)
-    except Exception as exc:
-        formatter = t.policy.failure_error_function
-        msg = formatter(exc) if formatter is not None else f"{type(exc).__name__}: {exc}"
-        result = ToolResult(content=[TextBlock(text=msg)], error=msg)
+        try:
+            if ts is None:
+                raise RuntimeError(f"no toolset owns tool {call.name!r}")
+            coro = ts.call_tool(rc, ToolCall(id=call.id, name=call.name, arguments=args))
+            result = await (
+                asyncio.wait_for(coro, timeout=timeout) if timeout is not None else coro
+            )
+        except NestedInterruption:
+            # Surface a ToolExecEnd marker for subscribers' symmetry, then
+            # re-raise so ``ToolDispatch`` can roll the child's pending
+            # approvals into the parent's interruption.
+            marker = ToolResult(
+                content=[TextBlock(text="<paused: subagent awaiting approval>")],
+                error="<paused>",
+            )
+            await rc.event_bus.publish(
+                ToolExecEnd(tool_call_id=call.id, result=marker, error=marker.error)
+            )
+            raise
+        except TimeoutError:
+            msg = f"tool {call.name!r} timed out after {timeout}s"
+            result = ToolResult(content=[TextBlock(text=msg)], error=msg)
+        except Exception as exc:
+            formatter = t.policy.failure_error_function
+            msg = formatter(exc) if formatter is not None else f"{type(exc).__name__}: {exc}"
+            result = ToolResult(content=[TextBlock(text=msg)], error=msg)
+    finally:
+        reset_current_run_ctx(token)
     await rc.event_bus.publish(ToolExecEnd(tool_call_id=call.id, result=result, error=result.error))
     post_payload = {
         "tool_name": call.name,

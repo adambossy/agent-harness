@@ -1,4 +1,4 @@
-"""The ``Agent`` orchestrator (Wave 4).
+"""The ``Agent`` orchestrator (Wave 4 / Wave 5).
 
 The public face of the harness — users call ``Agent.run``, ``Agent.iter``,
 ``Agent.stream``, ``Agent.as_tool``, and ``Agent.resume``. Every method
@@ -41,6 +41,7 @@ from .models import Message, Model, ModelSettings, TextBlock
 from .run_context import (
     RunContext,
     RunResult,
+    get_current_run_ctx,
     is_tool_allowed_in_mode,
     make_interruption,
     snapshot_from_ctx,
@@ -254,9 +255,16 @@ class Agent(Generic[Deps, Out]):
     ) -> Tool:
         """Wrap this agent as a :class:`Tool` for another agent (AG4 / S9).
 
-        Wave 5 hardens nested-approval semantics — this is the minimal
-        working version (decision #4): nested run, child events on a
-        separate bus, paused-child surfaces as an errored ToolResult.
+        Wave 5 hardens nested-approval propagation (decision #4):
+
+        * Nested events are republished on the **parent's** :class:`EventBus`
+          (AT2) — bookended by :class:`SubagentStart` / :class:`SubagentStop`
+          and with the child's own ``RunStart`` / ``RunEnd`` / ``AgentStart``
+          / ``AgentEnd`` filtered (the parent's loop already emits its own).
+        * Nested ``pending_approvals`` raise
+          :exc:`agent_harness.core.subagents.NestedInterruption`, which the
+          parent's :class:`ToolDispatch` catches and rolls into the parent's
+          own ``pending_approvals`` (AT3).
 
         Example:
             >>> from tests.fakes import FakeModel, FakeTurn
@@ -267,30 +275,55 @@ class Agent(Generic[Deps, Out]):
         agent = self
 
         async def _invoke(**kwargs: Any) -> ToolResult:
+            # Local imports keep the agent↔subagents cycle out of module init.
+            from .subagents import NestedInterruption, RepublishingBus
+
             mapped: Deps | None = deps_map(kwargs) if deps_map is not None else None
             prompt = kwargs.get("prompt", "")
-            child_bus = InMemoryEventBus()
-            await child_bus.publish(
-                SubagentStart(
-                    parent_agent_name="?",
-                    child_agent_name=agent.name,
-                    tool_call_id="?",
+
+            parent_ctx = get_current_run_ctx()
+            parent_bus: EventBus | None = parent_ctx.event_bus if parent_ctx else None
+            parent_name = parent_ctx.agent.name if parent_ctx and parent_ctx.agent else ""
+            tool_call_id = kwargs.get("_tool_call_id", "") or ""
+
+            if parent_bus is not None:
+                await parent_bus.publish(
+                    SubagentStart(
+                        parent_agent_name=parent_name,
+                        child_agent_name=agent.name,
+                        tool_call_id=tool_call_id,
+                    )
                 )
+
+            child_bus: EventBus = (
+                cast(EventBus, RepublishingBus(parent_bus))
+                if parent_bus is not None
+                else InMemoryEventBus()
             )
-            result = await agent.run(prompt, deps=mapped, event_bus=child_bus)
-            await child_bus.publish(
-                SubagentStop(
-                    parent_agent_name="?",
-                    child_agent_name=agent.name,
-                    tool_call_id="?",
-                )
-            )
-            await child_bus.close()
+            try:
+                result = await agent.run(prompt, deps=mapped, event_bus=child_bus)
+            finally:
+                if parent_bus is not None:
+                    await parent_bus.publish(
+                        SubagentStop(
+                            parent_agent_name=parent_name,
+                            child_agent_name=agent.name,
+                            tool_call_id=tool_call_id,
+                        )
+                    )
+                if isinstance(child_bus, InMemoryEventBus):
+                    await child_bus.close()
+
+            # Roll the child's usage into the parent's (AT4).
+            if parent_ctx is not None:
+                parent_ctx.usage = parent_ctx.usage + result.usage
+
             if result.pending_approvals:
-                return ToolResult(
-                    content=[TextBlock(text="subagent paused awaiting approvals")],
-                    error="subagent paused awaiting approvals",
-                    metadata={"pending_approvals": len(result.pending_approvals)},
+                raise NestedInterruption(
+                    child_agent_name=agent.name,
+                    tool_call_id=tool_call_id,
+                    pending_approvals=result.pending_approvals,
+                    child_run_state=result.run_state,
                 )
             text = str(result.output) if result.output is not None else ""
             return ToolResult(content=[TextBlock(text=text)])

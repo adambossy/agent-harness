@@ -182,6 +182,66 @@ async def test_smoke_two_turns_one_tool_call(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reader_with_summarizer_subagent(tmp_path: Path) -> None:
+    """W5 integration: a ``reader`` parent calls a ``summarizer`` subagent.
+
+    Exercises ``Agent.as_tool``'s nested-event republishing (AT2) and
+    end-to-end parent→child dispatch (AT1) inside the full loop.
+    """
+    summarizer: Agent[Any, Any] = Agent(
+        name="summarizer",
+        model=make_model(FakeTurn(text="A greeting and a test-file note.")),
+        toolsets=[],
+    )
+    summarizer_tool = summarizer.as_tool(
+        name="summarizer",
+        description="Summarize an input string into one line.",
+    )
+    parent_model = make_model(
+        FakeTurn(
+            text="dispatching",
+            tool_calls=[
+                ToolCall(
+                    id="ps1",
+                    name="summarizer",
+                    arguments={"prompt": "Hello, world!\nThis is a test file."},
+                )
+            ],
+        ),
+        FakeTurn(text="Reader summary: A greeting and a test-file note."),
+    )
+    from agent_harness.core.toolsets import StaticToolset
+
+    reader: Agent[Any, Any] = Agent(
+        name="reader",
+        model=parent_model,
+        toolsets=[StaticToolset(name="subs", tools=[summarizer_tool])],
+    )
+
+    bus = InMemoryEventBus()
+    collected: list[Any] = []
+    sub = bus.subscribe()
+
+    async def _drain() -> None:
+        async for ev in sub:
+            collected.append(ev)
+
+    collector = asyncio.create_task(_drain())
+    result = await reader.run(prompt="Summarize foo.txt", event_bus=bus)
+    await bus.close()
+    with contextlib.suppress(asyncio.CancelledError):
+        await collector
+
+    assert result.output is not None
+    assert "A greeting and a test-file note." in result.output
+    # Parent's bus saw SubagentStart / SubagentStop.
+    from agent_harness.core.events import SubagentStart, SubagentStop
+
+    assert any(isinstance(e, SubagentStart) for e in collected)
+    assert any(isinstance(e, SubagentStop) for e in collected)
+
+
+@pytest.mark.asyncio
 async def test_smoke_runs_under_100ms(tmp_path: Path) -> None:
     """The smoke test must run fast (no real network / I/O nondeterminism)."""
     import time
