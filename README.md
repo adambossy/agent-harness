@@ -16,7 +16,9 @@ pip install "agent-harness[anthropic,redis,modal]"
 
 Available extras: `anthropic`, `openai`, `google`, `redis`, `modal`, `fly`, `otel`, `vector`, `mcp`.
 
-## Usage
+## Getting started
+
+A minimal agent is a model plus a prompt:
 
 ```python
 import asyncio
@@ -31,6 +33,53 @@ agent = Agent(name="assistant", model=model)
 result = asyncio.run(agent.run("Hello!"))
 print(result.output)
 ```
+
+### Giving the agent tools
+
+Decorate a function with `@tool` (the input schema is read from its type hints,
+the descriptions from its docstring) and hand it to the agent in a toolset:
+
+```python
+import asyncio
+
+from agent_harness import Agent, StaticToolset, tool
+from agent_harness.providers.anthropic import AnthropicProvider, AnthropicMessagesModel
+
+
+@tool
+async def get_weather(city: str) -> str:
+    """Look up the current weather for a city.
+
+    Args:
+        city: Name of the city to look up.
+    """
+    # ... call a real weather API here ...
+    return f"It's sunny in {city}."
+
+
+provider = AnthropicProvider(api_key="sk-...")
+model = AnthropicMessagesModel(provider=provider)
+
+agent = Agent(
+    name="assistant",
+    model=model,
+    instructions="You are a helpful assistant.",
+    toolsets=[StaticToolset(name="tools", tools=[get_weather])],
+)
+
+result = asyncio.run(agent.run("What's the weather in Paris?"))
+print(result.output)  # -> e.g. "It's sunny in Paris."
+```
+
+Swap the model for another provider (`agent_harness.providers.openai`,
+`.google`), persist history with a session
+(`from agent_harness.sessions import SqliteSession`), or run tools inside an
+isolated sandbox (`from agent_harness.sandboxes import ModalSandbox`) — all via
+the same `Agent` constructor.
+
+> **Testing without an API key:** `tests/fakes.py` ships a `FakeModel` that
+> replays scripted turns, so you can exercise the full loop (including tool
+> dispatch) without a network call.
 
 The stable surface is re-exported from the top level (`from agent_harness import Agent, tool, Message, ...`); swappable backends live in their sub-packages (`agent_harness.providers`, `.sessions`, `.sandboxes`, `.long_term`, `.tracing`).
 
