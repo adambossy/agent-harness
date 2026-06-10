@@ -231,25 +231,59 @@ class GeminiModel:
                 contents.append({"role": role, "parts": parts})
         return system, contents
 
-    @staticmethod
-    def _tools_to_wire(tools: list[Any]) -> list[dict[str, Any]]:
+    # Keys that Gemini's function-declaration validator rejects with HTTP 400
+    # INVALID_ARGUMENT ("Cannot find field"). The schema works on
+    # OpenAI/Anthropic but is silently incompatible here, so strip them
+    # before sending. Stripping (rather than translating) is correct because
+    # Gemini treats the constraint as absent and the LLM compensates via
+    # the parameter description.
+    _GEMINI_UNSUPPORTED_SCHEMA_KEYS = frozenset(
+        {
+            "additionalProperties",
+            "additional_properties",
+            "$schema",
+            "$id",
+            "$ref",
+            "definitions",
+            "$defs",
+        }
+    )
+
+    @classmethod
+    def _sanitize_schema(cls, value: Any) -> Any:
+        """Recursively strip JSON-schema keys Gemini's API rejects."""
+        if isinstance(value, dict):
+            return {
+                k: cls._sanitize_schema(v)
+                for k, v in value.items()
+                if k not in cls._GEMINI_UNSUPPORTED_SCHEMA_KEYS
+            }
+        if isinstance(value, list):
+            return [cls._sanitize_schema(v) for v in value]
+        return value
+
+    @classmethod
+    def _tools_to_wire(cls, tools: list[Any]) -> list[dict[str, Any]]:
         decls: list[dict[str, Any]] = []
         for t in tools:
             if isinstance(t, dict):
-                # If already a function declaration, accept as-is.
+                # If already a function declaration, accept as-is (but
+                # sanitize — same Gemini constraint applies).
                 if "function_declarations" in t:
-                    return [t]
-                decls.append(t)
+                    return [cls._sanitize_schema(t)]
+                decls.append(cls._sanitize_schema(t))
                 continue
             name = getattr(t, "name", None)
             if name is None:
                 continue
+            schema = getattr(t, "input_schema", None) or getattr(
+                t, "schema", {"type": "object", "properties": {}}
+            )
             decls.append(
                 {
                     "name": name,
                     "description": getattr(t, "description", "") or "",
-                    "parameters": getattr(t, "input_schema", None)
-                    or getattr(t, "schema", {"type": "object", "properties": {}}),
+                    "parameters": cls._sanitize_schema(schema),
                 }
             )
         if not decls:
