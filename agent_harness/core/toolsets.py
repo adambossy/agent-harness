@@ -120,12 +120,18 @@ async def _invoke(tool_obj: Tool, arguments: dict[str, Any]) -> ToolResult:
     # in ``structured_content`` per MCP spec rev 2025-11-25 — UIs and
     # programmatic consumers should not have to re-parse the serialized
     # form. The LLM still sees the JSON-text in ``content``.
+    #
+    # ``structured_content`` is re-parsed from the serialized text (rather
+    # than holding ``raw`` itself) so it is guaranteed JSON-safe: ``raw``
+    # may contain Decimal / UUID / datetime values that ``default=str``
+    # flattens in the text but that would blow up any downstream
+    # ``json.dumps`` if passed through verbatim.
     structured: Any | None = None
     if raw is None:
         text = ""
     elif isinstance(raw, dict | list):
         text = json.dumps(raw, default=str)
-        structured = raw
+        structured = json.loads(text)
     else:
         text = str(raw)
     return ToolResult(content=[TextBlock(text=text)], structured_content=structured)
