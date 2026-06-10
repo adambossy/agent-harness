@@ -115,13 +115,20 @@ async def _invoke(tool_obj: Tool, arguments: dict[str, Any]) -> ToolResult:
     # Serialize dict/list returns via ``json.dumps`` (not ``str``) so the
     # model sees valid JSON, not Python ``repr``. ``default=str`` keeps
     # non-JSON-native values lossy-but-readable instead of raising.
+    #
+    # When the raw return is JSON-structured (dict/list), also preserve it
+    # in ``structured_content`` per MCP spec rev 2025-11-25 — UIs and
+    # programmatic consumers should not have to re-parse the serialized
+    # form. The LLM still sees the JSON-text in ``content``.
+    structured: Any | None = None
     if raw is None:
         text = ""
     elif isinstance(raw, dict | list):
         text = json.dumps(raw, default=str)
+        structured = raw
     else:
         text = str(raw)
-    return ToolResult(content=[TextBlock(text=text)])
+    return ToolResult(content=[TextBlock(text=text)], structured_content=structured)
 
 
 # --- StaticToolset (the default) -------------------------------------------

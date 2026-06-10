@@ -59,16 +59,29 @@ class ToolCall:
 class ToolResult:
     """Canonical tool result. Content blocks mirror MCP's shape.
 
+    ``structured_content`` mirrors MCP's ``structuredContent`` (spec rev
+    2025-11-25): when a tool returns structured data (dict/list/scalar JSON
+    values) it is preserved here verbatim, while a JSON-serialized copy is
+    also placed in ``content`` as a ``TextBlock`` for the LLM and any
+    legacy consumer that only reads ``content`` ("For backwards
+    compatibility, a tool that returns structured content SHOULD also
+    return the serialized JSON in a TextContent block.").
+
+    Consumers that want the structured value (e.g. UIs, programmatic
+    clients) read ``structured_content`` first and fall back to
+    ``content`` only when it is ``None``.
+
     Example:
         >>> from agent_harness.core.models import TextBlock
         >>> r = ToolResult(content=[TextBlock(text="ok")])
-        >>> r.error is None
+        >>> r.error is None and r.structured_content is None
         True
     """
 
     content: list[ContentBlock]
     error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    structured_content: Any | None = None
 
 
 # ---------------------------------------------------------------------------
