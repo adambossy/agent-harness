@@ -82,6 +82,7 @@ class Agent(Generic[Deps, Out]):
     model: Model
     toolsets: list[Toolset]
     session: Session | None
+    persist_session: bool
     sandbox: Sandbox | None
     long_term_memory: LongTermMemory | None
     history_processors: list[HistoryProcessor]
@@ -99,6 +100,7 @@ class Agent(Generic[Deps, Out]):
         toolsets: list[Toolset] | None = None,
         instructions: str | Callable[[RunContext[Deps]], str] = "",
         session: Session | None = None,
+        persist_session: bool = True,
         sandbox: Sandbox | None = None,
         long_term_memory: LongTermMemory | None = None,
         history_processors: list[HistoryProcessor] | None = None,
@@ -115,6 +117,11 @@ class Agent(Generic[Deps, Out]):
         self.model = model
         self.toolsets = list(toolsets) if toolsets is not None else []
         self.session = session
+        # When False, the run loop still *reads* prior history from ``session``
+        # but does not *write* messages or run-state back to it — i.e. no
+        # persistence to the session store. Lets a caller own persistence
+        # elsewhere without double-writing.
+        self.persist_session = persist_session
         self.sandbox = sandbox
         self.long_term_memory = long_term_memory
         self.history_processors = list(history_processors) if history_processors is not None else []

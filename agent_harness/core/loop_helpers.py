@@ -53,7 +53,7 @@ async def persist_snapshot(ctx: RunContext[Any], *, current_node: str) -> None:
     """Persist a node-boundary snapshot to ``Session`` if configured (LP4)."""
     snap = snapshot_from_ctx(ctx, current_node=current_node)
     agent = ctx.agent
-    if agent is not None and agent.session is not None:
+    if agent is not None and agent.session is not None and agent.persist_session:
         await agent.session.add_run_state(snap)
 
 

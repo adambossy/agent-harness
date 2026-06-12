@@ -118,7 +118,7 @@ class PrepareTurn(Node[RunContext[Any], None, RunResult[Any]]):
                 timestamp=datetime.now(UTC),
             )
             rc.messages.append(user_msg)
-            if agent.session is not None:
+            if agent.session is not None and agent.persist_session:
                 await agent.session.add_messages([user_msg])
 
         if rc.turn == 0:
@@ -194,7 +194,7 @@ class ModelRequest(Node[RunContext[Any], None, RunResult[Any]]):
 
         rc.usage = rc.usage + final_usage
         rc.messages.append(final_message)
-        if agent.session is not None:
+        if agent.session is not None and agent.persist_session:
             await agent.session.add_messages([final_message])
 
         tool_calls = list(final_message.tool_calls)
@@ -395,7 +395,7 @@ class ToolDispatch(Node[RunContext[Any], None, RunResult[Any]]):
                 timestamp=datetime.now(UTC),
             )
             rc.messages.append(tool_msg)
-            if agent.session is not None:
+            if agent.session is not None and agent.persist_session:
                 await agent.session.add_messages([tool_msg])
 
         rc.pending_approvals = []
