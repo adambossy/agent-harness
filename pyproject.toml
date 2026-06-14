@@ -35,6 +35,9 @@ dev = [
     "ruff>=0.7",
     "mypy>=1.13",
     "types-pyyaml>=6.0",
+    # OTEL subscriber tests exercise real span emission via an in-memory exporter.
+    "opentelemetry-api>=1.27",
+    "opentelemetry-sdk>=1.27",
 ]
 
 [build-system]
