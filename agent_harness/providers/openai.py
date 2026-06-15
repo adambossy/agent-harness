@@ -253,7 +253,7 @@ class OpenAIResponsesModel:
             payload["temperature"] = settings.temperature
         if settings.top_p is not None:
             payload["top_p"] = settings.top_p
-        wire_tools = self._tools_to_wire(tools)
+        wire_tools = self._tools_to_wire(tools) + list(settings.builtin_tools)
         if wire_tools:
             payload["tools"] = wire_tools
         if settings.parallel_tool_calls is not None and self.capabilities.parallel_tool_calls:

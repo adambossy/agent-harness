@@ -220,6 +220,11 @@ class ModelSettings(BaseModel):
     seed: int | None = None
     parallel_tool_calls: bool | None = None
     thinking_budget: int | None = None
+    # Provider-native ("built-in") tools appended to the wire tools list
+    # alongside the function-declaration tools — e.g. web search:
+    # OpenAI ``{"type": "web_search"}`` or Google ``{"google_search": {}}``.
+    # These coexist with custom @tool functions; they do not replace them.
+    builtin_tools: list[Any] = Field(default_factory=list)
     extra: dict[str, Any] = Field(default_factory=dict)
 
 

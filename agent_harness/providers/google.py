@@ -308,9 +308,13 @@ class GeminiModel:
             config["max_output_tokens"] = settings.max_tokens
         if settings.seed is not None:
             config["seed"] = settings.seed
-        wire_tools = self._tools_to_wire(tools)
+        wire_tools = self._tools_to_wire(tools) + list(settings.builtin_tools)
         if wire_tools:
             config["tools"] = wire_tools
+        if settings.builtin_tools:
+            # Gemini requires this flag to combine built-in (server-side) tools
+            # such as google_search with function-calling tools in one request.
+            config["tool_config"] = {"include_server_side_tool_invocations": True}
         if self.capabilities.thinking and settings.thinking_budget is not None:
             config["thinking_config"] = {
                 "include_thoughts": True,
