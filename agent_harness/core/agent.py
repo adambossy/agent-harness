@@ -20,7 +20,7 @@ import contextlib
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from .credentials import (
     Credential,
@@ -44,6 +44,9 @@ from .history import HistoryProcessor
 from .hooks import HookRegistry
 from .memory import LongTermMemory, Session
 from .models import Message, Model, ModelSettings, TextBlock, UsagePricer
+
+if TYPE_CHECKING:  # pragma: no cover - typing-only; extras stay out of core init
+    from ..extras.reminders import ReminderQueue
 from .run_context import (
     RunContext,
     RunResult,
@@ -100,6 +103,7 @@ class Agent(Generic[Deps, Out]):
     usage_pricer: UsagePricer | None
     credential: Credential | None
     credential_resolver: CredentialResolver | None
+    reminders: ReminderQueue | None
 
     def __init__(
         self,
@@ -121,6 +125,7 @@ class Agent(Generic[Deps, Out]):
         usage_pricer: UsagePricer | None = None,
         credential: Credential | None = None,
         credential_resolver: CredentialResolver | None = None,
+        reminders: ReminderQueue | None = None,
     ) -> None:
         if not name:
             raise ConfigError("Agent.name must be non-empty", context={"name": name})
@@ -152,6 +157,11 @@ class Agent(Generic[Deps, Out]):
         # provider uses whatever key it was constructed with.
         self.credential = credential
         self.credential_resolver = credential_resolver
+        # Host-supplied reminder queue. When set, the run loop drains it for
+        # this agent's session as the user prompt is appended and attaches each
+        # reminder as a ``<system-reminder>`` text block (see ``core/loop.py``).
+        # The system prompt stays untouched, so prompt caching is unaffected.
+        self.reminders = reminders
 
     # ----- run -------------------------------------------------------------
 

@@ -9,12 +9,22 @@ work without any of them.
 from .checkpoints import Checkpoint, CheckpointTracker
 from .ignoreset import IgnoreSet
 from .mentions import Mention, MentionResolver, ResolvedMention
+from .reminders import (
+    InMemoryReminderQueue,
+    Reminder,
+    ReminderQueue,
+    wrap_system_reminder,
+)
 
 __all__ = [
     "Checkpoint",
     "CheckpointTracker",
     "IgnoreSet",
+    "InMemoryReminderQueue",
     "Mention",
     "MentionResolver",
+    "Reminder",
+    "ReminderQueue",
     "ResolvedMention",
+    "wrap_system_reminder",
 ]

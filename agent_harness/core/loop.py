@@ -118,6 +118,19 @@ class PrepareTurn(Node[RunContext[Any], None, RunResult[Any]]):
                 content=[TextBlock(text=text)],
                 timestamp=datetime.now(UTC),
             )
+            # Flush backend-enqueued reminders into this turn's user message as
+            # ``<system-reminder>`` text blocks — before it is appended and
+            # persisted, so the recorded message carries them. The system prompt
+            # is never mutated, keeping prompt caching intact.
+            if agent.reminders is not None and agent.session is not None:
+                drained = await agent.reminders.drain(agent.session.session_id)
+                if drained:
+                    from ..extras.reminders import wrap_system_reminder
+
+                    user_msg.content.extend(
+                        TextBlock(text=wrap_system_reminder(r)) for r in drained
+                    )
+                    user_msg.metadata["system_reminder_kinds"] = [r.kind for r in drained]
             rc.messages.append(user_msg)
             if agent.session is not None and agent.persist_session:
                 await agent.session.add_messages([user_msg])
