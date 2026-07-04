@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from agent_harness.core.agent import Agent
+from agent_harness.core.credentials import ApiKeyCredential
 from agent_harness.core.events import (
     AgentEnd,
     AgentStart,
@@ -39,51 +40,46 @@ from agent_harness.tracing.console import ConsoleSubscriber
 
 
 def make_model_from_env() -> tuple[object, object, str]:
-    """Pick whichever provider's key works. Returns (model, provider, label)."""
+    """Pick whichever provider's key works. Returns (model, provider, label).
+
+    Reads the key from the environment and hands it to the provider as an
+    explicit :class:`ApiKeyCredential` — the harness has no global-key
+    fallback, so the key must be passed in.
+    """
     # Order: Anthropic, OpenAI, Google. First valid key wins.
     preferred = (os.environ.get("AGENT_HARNESS_PROVIDER") or "").lower()
-    candidates: list[tuple[str, callable]] = [
-        (
-            "anthropic",
-            lambda: (
-                AnthropicMessagesModel(provider=(p := AnthropicProvider())),
-                p,
-                f"anthropic / {AnthropicMessagesModel(provider=p).name}",
-            ),
-        ),
-        (
-            "openai",
-            lambda: (
-                OpenAIResponsesModel(provider=(p := OpenAIProvider())),
-                p,
-                f"openai / {OpenAIResponsesModel(provider=p).name}",
-            ),
-        ),
-        (
-            "google",
-            lambda: (
-                GeminiModel(provider=(p := GoogleProvider())),
-                p,
-                f"google / {GeminiModel(provider=p).name}",
-            ),
-        ),
-    ]
+    key_env = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "google": "GOOGLE_API_KEY",
+    }
+
+    def _build(name: str, key: str) -> tuple[object, object, str]:
+        cred = ApiKeyCredential(provider=name, key=key)
+        if name == "anthropic":
+            p: object = AnthropicProvider(credential=cred)
+            m: object = AnthropicMessagesModel(provider=p)  # type: ignore[arg-type]
+        elif name == "openai":
+            p = OpenAIProvider(credential=cred)
+            m = OpenAIResponsesModel(provider=p)  # type: ignore[arg-type]
+        else:
+            p = GoogleProvider(credential=cred)
+            m = GeminiModel(provider=p)  # type: ignore[arg-type]
+        return m, p, f"{name} / {m.name}"  # type: ignore[attr-defined]
+
+    candidates = list(key_env)
     if preferred:
-        candidates = [c for c in candidates if c[0] == preferred] or candidates
-    for name, factory in candidates:
-        key_env = {
-            "anthropic": "ANTHROPIC_API_KEY",
-            "openai": "OPENAI_API_KEY",
-            "google": "GOOGLE_API_KEY",
-        }[name]
-        if not os.environ.get(key_env):
+        candidates = [c for c in candidates if c == preferred] or candidates
+    for name in candidates:
+        key = os.environ.get(key_env[name])
+        if not key:
             continue
         try:
-            return factory()
+            return _build(name, key)
         except Exception as exc:
             print(f"  (skipping {name}: {exc})")
     raise RuntimeError(
-        "No provider keys worked. Set ANTHROPIC_API_KEY / " "OPENAI_API_KEY / GOOGLE_API_KEY."
+        "No provider keys worked. Set ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY."
     )
 
 
@@ -164,8 +160,7 @@ async def main() -> int:
         print(result.output)
         print()
         print(
-            f"--- usage --- input={result.usage.input_tokens} "
-            f"output={result.usage.output_tokens}"
+            f"--- usage --- input={result.usage.input_tokens} output={result.usage.output_tokens}"
         )
         print()
 

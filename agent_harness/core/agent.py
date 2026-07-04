@@ -22,6 +22,12 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Generic, TypeVar, cast
 
+from .credentials import (
+    Credential,
+    CredentialResolver,
+    SupportsCredential,
+    resolve_credential,
+)
 from .errors import ConfigError
 from .events import (
     AgentEnd,
@@ -92,6 +98,8 @@ class Agent(Generic[Deps, Out]):
     model_settings: ModelSettings
     output_validator: Callable[[Any], Awaitable[Out] | Out] | None
     usage_pricer: UsagePricer | None
+    credential: Credential | None
+    credential_resolver: CredentialResolver | None
 
     def __init__(
         self,
@@ -111,6 +119,8 @@ class Agent(Generic[Deps, Out]):
         model_settings: ModelSettings | None = None,
         output_validator: Callable[[Any], Awaitable[Out] | Out] | None = None,
         usage_pricer: UsagePricer | None = None,
+        credential: Credential | None = None,
+        credential_resolver: CredentialResolver | None = None,
     ) -> None:
         if not name:
             raise ConfigError("Agent.name must be non-empty", context={"name": name})
@@ -136,6 +146,12 @@ class Agent(Generic[Deps, Out]):
         # ``ModelUsage`` event after each model response (opt-in: no pricer,
         # no cost events — tokens still ride ``MessageEnd``).
         self.usage_pricer = usage_pricer
+        # Per-run credential. When set, the credential is resolved at the start
+        # of each run and applied to the model's provider (which rebuilds its
+        # client from it) — there is no global-key fallback. When unset, the
+        # provider uses whatever key it was constructed with.
+        self.credential = credential
+        self.credential_resolver = credential_resolver
 
     # ----- run -------------------------------------------------------------
 
@@ -159,6 +175,7 @@ class Agent(Generic[Deps, Out]):
         """
         from .loop import DecideNext, ModelRequest, PrepareTurn, ToolDispatch
 
+        self._apply_credential()
         ctx, bus_owned = self._build_context(prompt, deps, run_state, approvals, event_bus)
         graph = build_graph(
             [PrepareTurn, ModelRequest, ToolDispatch, DecideNext],
@@ -198,6 +215,7 @@ class Agent(Generic[Deps, Out]):
         """Yield each node (or :class:`End`) as the loop executes (AG2)."""
         from .loop import DecideNext, ModelRequest, PrepareTurn, ToolDispatch
 
+        self._apply_credential()
         ctx, bus_owned = self._build_context(prompt, deps, run_state, approvals, event_bus)
         graph = build_graph(
             [PrepareTurn, ModelRequest, ToolDispatch, DecideNext],
@@ -383,6 +401,31 @@ class Agent(Generic[Deps, Out]):
         )
 
     # ----- internal --------------------------------------------------------
+
+    def _apply_credential(self) -> None:
+        """Resolve this agent's credential (if any) and apply it to the model's
+        provider before a run.
+
+        A no-op when neither ``credential`` nor ``credential_resolver`` is set
+        — the provider keeps whatever key it was built with. When one *is* set
+        but the provider can't accept a per-run credential (no
+        ``use_credential``), that's a configuration error: fail loudly rather
+        than silently ignore the caller's credential.
+        """
+        if self.credential is None and self.credential_resolver is None:
+            return
+        cred = resolve_credential(
+            credential=self.credential,
+            credential_resolver=self.credential_resolver,
+        )
+        provider = getattr(self.model, "provider", None)
+        if not isinstance(provider, SupportsCredential):
+            raise ConfigError(
+                "agent was given a credential but the model's provider does not "
+                "support per-run credentials (no use_credential method)",
+                context={"agent": self.name, "provider": type(provider).__name__},
+            )
+        provider.use_credential(cred)
 
     def _build_context(
         self,

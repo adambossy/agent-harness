@@ -50,6 +50,22 @@ class ConfigError(AgentHarnessError):
     """
 
 
+class NoCredentialError(ConfigError):
+    """No credential could be resolved for a run / provider.
+
+    Raised instead of silently falling back to a process-global API key
+    (e.g. ``ANTHROPIC_API_KEY``): a run must be handed its credential
+    explicitly, via a :class:`~agent_harness.core.credentials.Credential` or a
+    resolver. Subclasses :class:`ConfigError` — a missing credential is a
+    configuration fault — so existing ``except ConfigError`` sites still catch
+    it while callers that care can match it precisely.
+
+    Example:
+        >>> isinstance(NoCredentialError("no credential"), ConfigError)
+        True
+    """
+
+
 class ModelError(AgentHarnessError):
     """The model returned malformed output or violated its contract.
 

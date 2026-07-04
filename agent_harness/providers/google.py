@@ -15,11 +15,16 @@ Example:
 
 from __future__ import annotations
 
-import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+from agent_harness.core.credentials import (
+    Credential,
+    CredentialResolver,
+    api_key_from_credential,
+    resolve_credential,
+)
 from agent_harness.core.errors import ModelError, NotSupportedError
 from agent_harness.core.events import (
     MessageDelta,
@@ -71,8 +76,7 @@ def _require_sdk() -> Any:
         from google import genai
     except ImportError as exc:  # pragma: no cover - exercised via mocks
         raise NotSupportedError(
-            "google-genai SDK is not installed; "
-            "install with `pip install agent-harness[google]`",
+            "google-genai SDK is not installed; install with `pip install agent-harness[google]`",
             cause=exc,
         ) from exc
     return genai
@@ -94,6 +98,8 @@ class GoogleProvider:
         self,
         *,
         api_key: str | None = None,
+        credential: Credential | None = None,
+        credential_resolver: CredentialResolver | None = None,
         base_url: str | None = None,
         client: Any | None = None,
         timeout: float | None = None,
@@ -103,14 +109,48 @@ class GoogleProvider:
         self._timeout = timeout
         self._max_retries = max_retries
         if client is not None:
+            # Pre-built client (tests / bring-your-own transport): the key is
+            # already baked in, so credential resolution is skipped entirely.
             self._client = client
             return
+        self._client = self._build_client(
+            api_key=api_key,
+            credential=credential,
+            credential_resolver=credential_resolver,
+        )
+
+    def _build_client(
+        self,
+        *,
+        api_key: str | None = None,
+        credential: Credential | None = None,
+        credential_resolver: CredentialResolver | None = None,
+    ) -> Any:
+        """Construct the ``genai.Client`` from a resolved key.
+
+        No ``GOOGLE_API_KEY`` fallback: the key is an explicit ``api_key`` or
+        the resolved :data:`Credential`; with neither,
+        :func:`resolve_credential` raises :class:`NoCredentialError`.
+        """
         sdk = _require_sdk()
-        key = api_key if api_key is not None else os.environ.get("GOOGLE_API_KEY")
-        kwargs: dict[str, Any] = {}
-        if key is not None:
-            kwargs["api_key"] = key
-        self._client = sdk.Client(**kwargs)
+        key = self._resolve_key(api_key, credential, credential_resolver)
+        return sdk.Client(api_key=key)
+
+    def _resolve_key(
+        self,
+        api_key: str | None,
+        credential: Credential | None,
+        credential_resolver: CredentialResolver | None,
+    ) -> str:
+        if api_key is not None:
+            return api_key
+        cred = resolve_credential(credential=credential, credential_resolver=credential_resolver)
+        return api_key_from_credential(cred, expected_provider=self.name)
+
+    def use_credential(self, credential: Credential) -> None:
+        """Rebuild the client to authenticate with ``credential`` (the
+        per-run credential seam an :class:`Agent` drives)."""
+        self._client = self._build_client(credential=credential)
 
     @property
     def client(self) -> Any:
