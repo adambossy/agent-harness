@@ -6,12 +6,22 @@ sub-packages and import *from* core; core itself never imports them.
 """
 
 from .agent import Agent, RunContext, RunResult
+from .credentials import (
+    ApiKeyCredential,
+    Credential,
+    CredentialResolver,
+    OAuthCredential,
+    SupportsCredential,
+    api_key_from_credential,
+    resolve_credential,
+)
 from .errors import (
     AgentHarnessError,
     BudgetExceededError,
     BusClosedError,
     ConfigError,
     ModelError,
+    NoCredentialError,
     NotSupportedError,
     SandboxError,
     SandboxTimeoutError,
@@ -37,6 +47,7 @@ from .events import (
     ModelEnd,
     ModelRetryRequest,
     ModelStart,
+    ModelUsage,
     NodeEnter,
     NodeExit,
     RunEnd,
@@ -97,6 +108,7 @@ from .mcp import MCPServer, MCPServerHTTP, MCPServerSSE, MCPServerStdio
 from .memory import LongTermMemory, Memory, Session
 from .models import (
     ContentBlock,
+    Cost,
     ImageBlock,
     Message,
     Model,
@@ -109,6 +121,7 @@ from .models import (
     ToolCallBlock,
     ToolResultBlock,
     Usage,
+    UsagePricer,
 )
 from .run_state import (
     SCHEMA_VERSION,
@@ -143,7 +156,6 @@ from .toolsets import (
 )
 
 __all__ = [
-    "Agent",
     "CHARS_PER_TOKEN",
     "COLLAPSE_MARKER_PREFIX",
     "DEFAULT_QUEUE_MAXSIZE",
@@ -155,9 +167,11 @@ __all__ = [
     "SUMMARY_MARKER_PREFIX",
     "TOOL_SEARCH",
     "TRUNCATED_MARKER",
+    "Agent",
     "AgentEnd",
     "AgentHarnessError",
     "AgentStart",
+    "ApiKeyCredential",
     "Approval",
     "ApprovalRequest",
     "ApprovalRequested",
@@ -171,6 +185,9 @@ __all__ = [
     "ConfigError",
     "ContentBlock",
     "ContextCollapse",
+    "Cost",
+    "Credential",
+    "CredentialResolver",
     "DedupFileReads",
     "ElicitationRequested",
     "Error",
@@ -215,10 +232,13 @@ __all__ = [
     "ModelRetryRequest",
     "ModelSettings",
     "ModelStart",
+    "ModelUsage",
+    "NoCredentialError",
     "Node",
     "NodeEnter",
     "NodeExit",
     "NotSupportedError",
+    "OAuthCredential",
     "PermissionMode",
     "PrefixedToolset",
     "Provider",
@@ -245,6 +265,7 @@ __all__ = [
     "SubagentStop",
     "SubprocessExecutor",
     "SummarizeOldTurns",
+    "SupportsCredential",
     "TextBlock",
     "ThinkingBlock",
     "ThinkingDelta",
@@ -265,11 +286,14 @@ __all__ = [
     "ToolResultBlock",
     "Toolset",
     "Usage",
+    "UsagePricer",
+    "api_key_from_credential",
     "apply_processor",
     "build_graph",
     "clear_deferred_tools",
     "iter_graph",
     "register_deferred_tools",
+    "resolve_credential",
     "run_graph",
     "tool",
 ]

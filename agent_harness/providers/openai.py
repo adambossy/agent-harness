@@ -20,11 +20,16 @@ Example:
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
+from agent_harness.core.credentials import (
+    Credential,
+    CredentialResolver,
+    api_key_from_credential,
+    resolve_credential,
+)
 from agent_harness.core.errors import ModelError, NotSupportedError
 from agent_harness.core.events import (
     MessageDelta,
@@ -99,6 +104,8 @@ class OpenAIProvider:
         self,
         *,
         api_key: str | None = None,
+        credential: Credential | None = None,
+        credential_resolver: CredentialResolver | None = None,
         base_url: str | None = None,
         client: Any | None = None,
         timeout: float | None = None,
@@ -108,21 +115,57 @@ class OpenAIProvider:
         self.base_url = base_url
         self._timeout = timeout
         self._max_retries = max_retries
+        self._organization = organization
         if client is not None:
+            # Pre-built client (tests / bring-your-own transport): the key is
+            # already baked in, so credential resolution is skipped entirely.
             self._client = client
             return
+        self._client = self._build_client(
+            api_key=api_key,
+            credential=credential,
+            credential_resolver=credential_resolver,
+        )
+
+    def _build_client(
+        self,
+        *,
+        api_key: str | None = None,
+        credential: Credential | None = None,
+        credential_resolver: CredentialResolver | None = None,
+    ) -> Any:
+        """Construct the ``AsyncOpenAI`` client from a resolved key.
+
+        No ``OPENAI_API_KEY`` fallback: the key is an explicit ``api_key`` or
+        the resolved :data:`Credential`; with neither,
+        :func:`resolve_credential` raises :class:`NoCredentialError`.
+        """
         sdk = _require_sdk()
-        key = api_key if api_key is not None else os.environ.get("OPENAI_API_KEY")
-        kwargs: dict[str, Any] = {"max_retries": max_retries}
-        if key is not None:
-            kwargs["api_key"] = key
-        if base_url is not None:
-            kwargs["base_url"] = base_url
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        if organization is not None:
-            kwargs["organization"] = organization
-        self._client = sdk.AsyncOpenAI(**kwargs)
+        key = self._resolve_key(api_key, credential, credential_resolver)
+        kwargs: dict[str, Any] = {"max_retries": self._max_retries, "api_key": key}
+        if self.base_url is not None:
+            kwargs["base_url"] = self.base_url
+        if self._timeout is not None:
+            kwargs["timeout"] = self._timeout
+        if self._organization is not None:
+            kwargs["organization"] = self._organization
+        return sdk.AsyncOpenAI(**kwargs)
+
+    def _resolve_key(
+        self,
+        api_key: str | None,
+        credential: Credential | None,
+        credential_resolver: CredentialResolver | None,
+    ) -> str:
+        if api_key is not None:
+            return api_key
+        cred = resolve_credential(credential=credential, credential_resolver=credential_resolver)
+        return api_key_from_credential(cred, expected_provider=self.name)
+
+    def use_credential(self, credential: Credential) -> None:
+        """Rebuild the client to authenticate with ``credential`` (the
+        per-run credential seam an :class:`Agent` drives)."""
+        self._client = self._build_client(credential=credential)
 
     @property
     def client(self) -> Any:

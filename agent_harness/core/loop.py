@@ -32,6 +32,7 @@ from .events import (
     ModelEnd,
     ModelRetryRequest,
     ModelStart,
+    ModelUsage,
     NodeEnter,
     NodeExit,
     ToolCallDelta,
@@ -193,6 +194,23 @@ class ModelRequest(Node[RunContext[Any], None, RunResult[Any]]):
             return End(terminal_result(rc))
 
         rc.usage = rc.usage + final_usage
+        if agent.usage_pricer is not None:
+            # Price this turn's tokens (not cumulative) and surface the cost on
+            # the bus; a pricer failure must not fail the run (EV8).
+            try:
+                cost = agent.usage_pricer(agent.model.name, final_usage)
+            except Exception as exc:
+                await rc.event_bus.publish(
+                    Error(
+                        message=f"usage pricer failed: {exc}",
+                        cause=type(exc),
+                        recoverable=True,
+                    )
+                )
+            else:
+                await rc.event_bus.publish(
+                    ModelUsage(model_name=agent.model.name, usage=final_usage, cost=cost)
+                )
         rc.messages.append(final_message)
         if agent.session is not None and agent.persist_session:
             await agent.session.add_messages([final_message])
