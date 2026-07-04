@@ -37,6 +37,7 @@ from .events import (
     ModelEnd,
     ModelRetryRequest,
     ModelStart,
+    ModelUsage,
     NodeEnter,
     NodeExit,
     RunEnd,
@@ -97,6 +98,7 @@ from .mcp import MCPServer, MCPServerHTTP, MCPServerSSE, MCPServerStdio
 from .memory import LongTermMemory, Memory, Session
 from .models import (
     ContentBlock,
+    Cost,
     ImageBlock,
     Message,
     Model,
@@ -109,6 +111,7 @@ from .models import (
     ToolCallBlock,
     ToolResultBlock,
     Usage,
+    UsagePricer,
 )
 from .run_state import (
     SCHEMA_VERSION,
@@ -143,7 +146,6 @@ from .toolsets import (
 )
 
 __all__ = [
-    "Agent",
     "CHARS_PER_TOKEN",
     "COLLAPSE_MARKER_PREFIX",
     "DEFAULT_QUEUE_MAXSIZE",
@@ -155,6 +157,7 @@ __all__ = [
     "SUMMARY_MARKER_PREFIX",
     "TOOL_SEARCH",
     "TRUNCATED_MARKER",
+    "Agent",
     "AgentEnd",
     "AgentHarnessError",
     "AgentStart",
@@ -171,6 +174,7 @@ __all__ = [
     "ConfigError",
     "ContentBlock",
     "ContextCollapse",
+    "Cost",
     "DedupFileReads",
     "ElicitationRequested",
     "Error",
@@ -215,6 +219,7 @@ __all__ = [
     "ModelRetryRequest",
     "ModelSettings",
     "ModelStart",
+    "ModelUsage",
     "Node",
     "NodeEnter",
     "NodeExit",
@@ -265,6 +270,7 @@ __all__ = [
     "ToolResultBlock",
     "Toolset",
     "Usage",
+    "UsagePricer",
     "apply_processor",
     "build_graph",
     "clear_deferred_tools",

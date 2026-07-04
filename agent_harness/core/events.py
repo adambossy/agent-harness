@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .errors import BusClosedError, ConfigError
-from .models import Message, Usage
+from .models import Cost, Message, Usage
 from .run_state import ApprovalRequest
 
 if TYPE_CHECKING:  # pragma: no cover - import-time only
@@ -113,7 +113,9 @@ class MessageDelta:
         ...     message_id="m1",
         ...     delta="hi",
         ...     partial=Message(
-        ...         role="assistant", content=[], timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc)
+        ...         role="assistant",
+        ...         content=[],
+        ...         timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
         ...     ),
         ... ).delta
         'hi'
@@ -187,6 +189,30 @@ class ModelEnd:
 
     message_id: str
     usage: Usage
+
+
+@dataclass(frozen=True, slots=True)
+class ModelUsage:
+    """Token usage + host-priced cost for one model response.
+
+    Emitted by the loop after each model turn when the agent carries a
+    :data:`~agent_harness.core.models.UsagePricer` (EV8: observing, never
+    intervening). ``usage`` is that turn's token counts (not cumulative);
+    ``cost`` is the pricer's verdict for those tokens. Consumers that only
+    need tokens can still read them off :class:`MessageEnd`; this event is the
+    one place cost rides the bus.
+
+    Example:
+        >>> from agent_harness.core.models import Cost, Usage
+        >>> ModelUsage(
+        ...     model_name="m", usage=Usage(input_tokens=10), cost=Cost(input_cost=0.01)
+        ... ).cost.total
+        0.01
+    """
+
+    model_name: str
+    usage: Usage
+    cost: Cost
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,6 +339,7 @@ Event = (
     | ToolCallDelta
     | ToolCallEnd
     | ModelEnd
+    | ModelUsage
     | ModelRetryRequest
     | ToolExecStart
     | ToolExecEnd

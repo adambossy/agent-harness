@@ -22,6 +22,7 @@ Example:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from types import NotImplementedType
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, runtime_checkable
@@ -175,6 +176,56 @@ class Usage(BaseModel):
             cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
             cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
         )
+
+
+# --- Cost --------------------------------------------------------------------
+
+
+class Cost(BaseModel):
+    """Per-category monetary cost of a :class:`Usage`, in a single currency.
+
+    The harness never invents prices: a :data:`UsagePricer` supplied by the
+    host turns tokens into a ``Cost``. Amounts are plain floats in whatever
+    currency the pricer used (USD by convention). Sums via ``+`` so a run's
+    total is ``sum(costs, Cost())``.
+
+    Example:
+        >>> (Cost(input_cost=0.01) + Cost(output_cost=0.02)).total
+        0.03
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_cost: float = 0.0
+    output_cost: float = 0.0
+    cache_read_cost: float = 0.0
+    cache_write_cost: float = 0.0
+
+    @property
+    def total(self) -> float:
+        """Sum of every cost category."""
+        return self.input_cost + self.output_cost + self.cache_read_cost + self.cache_write_cost
+
+    def __add__(self, other: object) -> Cost | NotImplementedType:
+        if not isinstance(other, Cost):
+            return NotImplemented
+        return Cost(
+            input_cost=self.input_cost + other.input_cost,
+            output_cost=self.output_cost + other.output_cost,
+            cache_read_cost=self.cache_read_cost + other.cache_read_cost,
+            cache_write_cost=self.cache_write_cost + other.cache_write_cost,
+        )
+
+
+UsagePricer = Callable[[str, Usage], Cost]
+"""Host-supplied hook mapping ``(model_name, usage) -> Cost``.
+
+Injected on :class:`~agent_harness.core.agent.Agent`; the loop calls it after
+each model response and publishes the resulting cost as a
+:class:`~agent_harness.core.events.ModelUsage` event. The harness ships no
+price table of its own — see :mod:`agent_harness.usage.counting` for a
+batteries-included implementation the host can construct and pass in.
+"""
 
 
 # --- Capabilities + settings -------------------------------------------------

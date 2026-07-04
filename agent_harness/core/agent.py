@@ -37,7 +37,7 @@ from .graph import GraphRunResult, build_graph, iter_graph, run_graph
 from .history import HistoryProcessor
 from .hooks import HookRegistry
 from .memory import LongTermMemory, Session
-from .models import Message, Model, ModelSettings, TextBlock
+from .models import Message, Model, ModelSettings, TextBlock, UsagePricer
 from .run_context import (
     RunContext,
     RunResult,
@@ -91,6 +91,7 @@ class Agent(Generic[Deps, Out]):
     hooks: HookRegistry | None
     model_settings: ModelSettings
     output_validator: Callable[[Any], Awaitable[Out] | Out] | None
+    usage_pricer: UsagePricer | None
 
     def __init__(
         self,
@@ -109,6 +110,7 @@ class Agent(Generic[Deps, Out]):
         hooks: HookRegistry | None = None,
         model_settings: ModelSettings | None = None,
         output_validator: Callable[[Any], Awaitable[Out] | Out] | None = None,
+        usage_pricer: UsagePricer | None = None,
     ) -> None:
         if not name:
             raise ConfigError("Agent.name must be non-empty", context={"name": name})
@@ -130,6 +132,10 @@ class Agent(Generic[Deps, Out]):
         self.hooks = hooks
         self.model_settings = model_settings or ModelSettings()
         self.output_validator = output_validator
+        # Host-supplied token→cost hook. When set, the loop publishes a
+        # ``ModelUsage`` event after each model response (opt-in: no pricer,
+        # no cost events — tokens still ride ``MessageEnd``).
+        self.usage_pricer = usage_pricer
 
     # ----- run -------------------------------------------------------------
 
