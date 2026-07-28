@@ -14,13 +14,19 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent_harness.core.credentials import Credential, CredentialResolver
+from agent_harness.core.models import Message, ModelCapabilities, ModelSettings
 
-from .anthropic import AnthropicProvider
+from .anthropic import AnthropicMessagesModel, AnthropicProvider
 
 __all__ = [
+    "CAPS_GLM_5_2",
+    "CAPS_KIMI_K3",
+    "GLM_5_2",
+    "KIMI_K3",
     "MOONSHOT_DIRECT",
     "OPENROUTER_BASE_URL",
     "US_FP8_ZDR",
+    "OpenRouterModel",
     "OpenRouterProvider",
     "RoutingPolicy",
 ]
@@ -128,3 +134,85 @@ class OpenRouterProvider(AnthropicProvider):
             timeout=timeout,
             max_retries=max_retries,
         )
+
+
+GLM_5_2 = "z-ai/glm-5.2"
+"""Zhipu / Z.ai GLM-5.2 on OpenRouter."""
+
+KIMI_K3 = "moonshotai/kimi-k3"
+"""Moonshot AI Kimi K3 on OpenRouter."""
+
+CAPS_GLM_5_2 = ModelCapabilities(
+    parallel_tool_calls=True,
+    thinking=True,
+    cache_control=False,
+    vision=False,
+    audio_input=False,
+    audio_output=False,
+    structured_output=True,
+    context_window=1_048_576,
+    max_output_tokens=131_072,
+    supports_compaction=False,
+)
+"""GLM-5.2 limits, from the cheapest routable endpoint (``novita/fp8``).
+
+``cache_control`` is False: OpenRouter's automatic prompt caching on the
+Anthropic Skin is documented for Claude models only.
+"""
+
+CAPS_KIMI_K3 = ModelCapabilities(
+    parallel_tool_calls=True,
+    thinking=True,
+    cache_control=False,
+    vision=True,
+    audio_input=False,
+    audio_output=False,
+    structured_output=True,
+    context_window=1_048_576,
+    max_output_tokens=131_072,
+    supports_compaction=False,
+)
+"""Kimi K3 limits. Multimodal input; reasoning is always on upstream."""
+
+
+class OpenRouterModel(AnthropicMessagesModel):
+    """An OpenRouter-served model driven over the Anthropic Messages format.
+
+    Adds one thing to its parent: every request carries a
+    :class:`RoutingPolicy` in ``extra_body.provider``, so an unconfigured call
+    is still constrained to the vetted provider set. Without it OpenRouter
+    load-balances by inverse-square price weighting, which pulls hard toward
+    the cheapest — typically FP4-quantized — endpoint.
+
+    A caller who puts their own ``provider`` object in
+    ``ModelSettings.extra["extra_body"]`` wins; the policy is a default, not a
+    cage.
+
+    Example:
+        >>> # OpenRouterModel(provider=p, name=GLM_5_2, capabilities=CAPS_GLM_5_2)  # doctest: +SKIP
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: AnthropicProvider,
+        name: str = GLM_5_2,
+        capabilities: ModelCapabilities | None = None,
+        routing: RoutingPolicy | None = None,
+    ) -> None:
+        super().__init__(provider=provider, name=name, capabilities=capabilities)
+        self.routing = routing if routing is not None else US_FP8_ZDR
+
+    def _build_payload(
+        self,
+        messages: list[Message],
+        tools: list[Any],
+        settings: ModelSettings,
+    ) -> dict[str, Any]:
+        payload = super()._build_payload(messages, tools, settings)
+        # The parent merged settings.extra already, so anything the caller put
+        # in extra_body is present here; setdefault leaves their policy intact.
+        extra_body: dict[str, Any] = dict(payload.get("extra_body") or {})
+        extra_body.setdefault("provider", self.routing.to_wire())
+        payload["extra_body"] = extra_body
+        return payload

@@ -8,17 +8,23 @@ from __future__ import annotations
 
 import sys
 import types
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
 
 from agent_harness.core.credentials import ApiKeyCredential, OAuthCredential
 from agent_harness.core.errors import ConfigError, NotSupportedError
-from agent_harness.core.models import Provider
+from agent_harness.core.models import Message, Model, ModelSettings, Provider, TextBlock
 from agent_harness.providers.openrouter import (
+    CAPS_GLM_5_2,
+    CAPS_KIMI_K3,
+    GLM_5_2,
+    KIMI_K3,
     MOONSHOT_DIRECT,
     OPENROUTER_BASE_URL,
     US_FP8_ZDR,
+    OpenRouterModel,
     OpenRouterProvider,
     RoutingPolicy,
 )
@@ -142,3 +148,56 @@ def test_provider_raises_when_sdk_missing(monkeypatch: pytest.MonkeyPatch) -> No
 def test_provider_satisfies_protocol() -> None:
     p = OpenRouterProvider(client=object())
     assert isinstance(cast(object, p), Provider)
+
+
+def _model(**kw: Any) -> OpenRouterModel:
+    return OpenRouterModel(provider=OpenRouterProvider(client=object()), **kw)
+
+
+def _ts() -> datetime:
+    return datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _msgs() -> list[Message]:
+    return [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())]
+
+
+def test_payload_carries_the_default_routing_policy() -> None:
+    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    payload = m._build_payload(_msgs(), [], ModelSettings())
+    assert payload["model"] == "z-ai/glm-5.2"
+    assert payload["extra_body"]["provider"] == US_FP8_ZDR.to_wire()
+
+
+def test_explicit_routing_policy_overrides_the_default() -> None:
+    m = _model(name=KIMI_K3, capabilities=CAPS_KIMI_K3, routing=MOONSHOT_DIRECT)
+    payload = m._build_payload(_msgs(), [], ModelSettings())
+    assert payload["extra_body"]["provider"]["only"] == ["moonshotai"]
+    assert "quantizations" not in payload["extra_body"]["provider"]
+
+
+def test_caller_supplied_extra_body_provider_wins() -> None:
+    # ModelSettings.extra is merged by the parent _build_payload before we run,
+    # so a caller who states a policy explicitly must not be overridden.
+    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    settings = ModelSettings(extra={"extra_body": {"provider": {"only": ["baseten"]}}})
+    payload = m._build_payload(_msgs(), [], settings)
+    assert payload["extra_body"]["provider"] == {"only": ["baseten"]}
+
+
+def test_caller_extra_body_keys_are_preserved_alongside_routing() -> None:
+    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    settings = ModelSettings(extra={"extra_body": {"transforms": ["middle-out"]}})
+    payload = m._build_payload(_msgs(), [], settings)
+    assert payload["extra_body"]["transforms"] == ["middle-out"]
+    assert payload["extra_body"]["provider"] == US_FP8_ZDR.to_wire()
+
+
+def test_model_capability_constants_match_live_endpoint_limits() -> None:
+    assert CAPS_GLM_5_2.context_window == 1_048_576
+    assert CAPS_GLM_5_2.max_output_tokens == 131_072
+    assert CAPS_KIMI_K3.context_window == 1_048_576
+
+
+def test_model_satisfies_protocol() -> None:
+    assert isinstance(cast(object, _model()), Model)
