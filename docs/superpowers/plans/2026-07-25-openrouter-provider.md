@@ -639,16 +639,38 @@ git commit -m "docs: OpenRouter provider usage"
 
 ## Deferred / follow-up (explicitly out of scope)
 
-- **Live smoke test.** Every test here is mocked. Before trusting this in
-  production, run one real request per model with a funded OpenRouter key and
-  confirm (a) the Anthropic Skin serves *non-Claude* models correctly, and
-  (b) `usage` accounting arrives. Model mapping is documented but unverified
-  for GLM-5.2 and K3 specifically.
-- **Thinking-budget mapping.** `reasoning` appears on OpenRouter's
-  `/chat/completions` schema but **not** on `/messages`. The parent adapter
-  sends Anthropic-style `thinking: {budget_tokens: N}`; how the Skin maps that
-  onto GLM-5.2's High/Max effort levels (and K3's always-on reasoning) is
-  unconfirmed. Verify with the smoke test before relying on `thinking_budget`.
+- ~~**Live smoke test.**~~ **DONE 2026-07-25** — run against the real API
+  before implementation. Results, which de-risk the whole design:
+  - The Anthropic Skin **does** serve non-Claude models. `z-ai/glm-5.2`
+    returned a well-formed Anthropic response; `moonshotai/kimi-k3` likewise.
+  - Reasoning arrives as native Anthropic `{"type": "thinking"}` blocks, so
+    the parent adapter's thinking path works unchanged and `thinking=True`
+    in the capability constants is correct.
+  - **Tool calling works**: a request with `input_schema` tools returned
+    `stop_reason: "tool_use"` and a proper `tool_use` block
+    (`get_weather`, `{"city": "Paris"}`).
+  - **Routing is enforced end-to-end**: the request was served by **Novita**,
+    the cheapest endpoint in `US_FP8_ZDR` — confirming `only` + `sort:"price"`
+    behave as designed. `usage` and `cost` accounting both arrive.
+  - **Filters are hard, with no silent escape.** An unsatisfiable `only`
+    returns HTTP 404 `"No allowed providers are available for the selected
+    model"` with `allow_fallbacks` either true *or* false; a quantization
+    mismatch returns 404 `"No endpoints found for the request with
+    quantization: fp4"`. OpenRouter never falls back outside the allowlist.
+- **Thinking consumes the output budget.** With `max_tokens: 64`, GLM-5.2
+  spent all 64 on thinking and returned `stop_reason: "max_tokens"` with no
+  text block at all. Callers must size `max_tokens` for reasoning **plus**
+  answer. This is why the capability constants set `max_output_tokens` to
+  131,072 rather than a small default.
+- **Kimi K3 is rate-limited on OpenRouter's shared pool.** Repeated calls
+  returned HTTP 429 `"moonshotai/kimi-k3 is temporarily rate-limited
+  upstream"`. Sustained K3 use likely needs BYOK or a funded account; the
+  provider code needs no change for this, but callers should expect 429s.
+- **Thinking-block round-trip is unverified.** Returned `thinking` blocks
+  carry an empty `signature`. The parent `_block_to_wire` sends
+  `{"type": "thinking", "thinking": …}` with no signature on later turns.
+  Whether the Skin accepts that in multi-turn conversations is untested —
+  pre-existing parent behaviour, but it will bite first here.
 - **A generic `ChatCompletionsModel`.** Deliberately not built. It would serve
   Groq/Together/vLLM directly, but no second caller exists yet — add the knob
   when one does.
