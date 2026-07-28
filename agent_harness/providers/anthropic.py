@@ -324,6 +324,8 @@ class AnthropicMessagesModel:
                 "budget_tokens": settings.thinking_budget,
             }
         # Provider-specific carry-through.
+        # OpenRouterModel._build_payload (subclass) depends on this merge
+        # happening here, before it reads payload back from super().
         for k, v in settings.extra.items():
             payload[k] = v
         return payload

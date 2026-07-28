@@ -11,9 +11,10 @@ which upstream inference providers a request may be routed to.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from agent_harness.core.credentials import Credential, CredentialResolver
+from agent_harness.core.errors import ConfigError
 from agent_harness.core.models import Message, ModelCapabilities, ModelSettings
 
 from .anthropic import AnthropicMessagesModel, AnthropicProvider
@@ -50,9 +51,9 @@ class RoutingPolicy:
     only: tuple[str, ...] = ()
     quantizations: tuple[str, ...] = ()
     zdr: bool = True
-    data_collection: str = "deny"
+    data_collection: Literal["deny", "allow"] = "deny"
     require_parameters: bool = True
-    sort: str = "price"
+    sort: Literal["price", "throughput", "latency"] = "price"
     allow_fallbacks: bool = True
 
     def to_wire(self) -> dict[str, Any]:
@@ -174,6 +175,16 @@ CAPS_KIMI_K3 = ModelCapabilities(
 )
 """Kimi K3 limits. Multimodal input; reasoning is always on upstream."""
 
+_CAPS_BY_MODEL: dict[str, ModelCapabilities] = {GLM_5_2: CAPS_GLM_5_2, KIMI_K3: CAPS_KIMI_K3}
+"""Known OpenRouter model ids → their verified capabilities.
+
+Looked up in :meth:`OpenRouterModel.__init__` when the caller omits
+``capabilities`` explicitly. Deliberately does *not* fall through to the
+parent's Anthropic-Opus default — that fallback is exactly what once made an
+unconfigured ``OpenRouterModel`` silently claim Opus context/output limits
+and ``cache_control=True`` under a GLM name.
+"""
+
 
 class OpenRouterModel(AnthropicMessagesModel):
     """An OpenRouter-served model driven over the Anthropic Messages format.
@@ -195,11 +206,19 @@ class OpenRouterModel(AnthropicMessagesModel):
     def __init__(
         self,
         *,
-        provider: AnthropicProvider,
+        provider: OpenRouterProvider,
         name: str = GLM_5_2,
         capabilities: ModelCapabilities | None = None,
         routing: RoutingPolicy | None = None,
     ) -> None:
+        if capabilities is None:
+            capabilities = _CAPS_BY_MODEL.get(name)
+            if capabilities is None:
+                raise ConfigError(
+                    f"no known capabilities for OpenRouter model {name!r}; pass "
+                    "capabilities explicitly for models outside _CAPS_BY_MODEL "
+                    "(GLM_5_2, KIMI_K3)"
+                )
         super().__init__(provider=provider, name=name, capabilities=capabilities)
         self.routing = routing if routing is not None else US_FP8_ZDR
 
@@ -210,8 +229,10 @@ class OpenRouterModel(AnthropicMessagesModel):
         settings: ModelSettings,
     ) -> dict[str, Any]:
         payload = super()._build_payload(messages, tools, settings)
-        # The parent merged settings.extra already, so anything the caller put
-        # in extra_body is present here; setdefault leaves their policy intact.
+        # The parent merges settings.extra into the top-level payload (order
+        # doesn't matter, only that it happens before we read it here), so
+        # anything the caller put in extra_body is already present; setdefault
+        # leaves their policy intact.
         extra_body: dict[str, Any] = dict(payload.get("extra_body") or {})
         extra_body.setdefault("provider", self.routing.to_wire())
         payload["extra_body"] = extra_body

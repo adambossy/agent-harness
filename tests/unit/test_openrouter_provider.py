@@ -8,14 +8,23 @@ from __future__ import annotations
 
 import sys
 import types
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 
 from agent_harness.core.credentials import ApiKeyCredential, OAuthCredential
 from agent_harness.core.errors import ConfigError, NotSupportedError
-from agent_harness.core.models import Message, Model, ModelSettings, Provider, TextBlock
+from agent_harness.core.models import (
+    Message,
+    Model,
+    ModelCapabilities,
+    ModelSettings,
+    Provider,
+    TextBlock,
+)
 from agent_harness.providers.openrouter import (
     CAPS_GLM_5_2,
     CAPS_KIMI_K3,
@@ -201,3 +210,100 @@ def test_model_capability_constants_match_live_endpoint_limits() -> None:
 
 def test_model_satisfies_protocol() -> None:
     assert isinstance(cast(object, _model()), Model)
+
+
+# --- tests: capability resolution (Finding 1) -------------------------------
+
+
+def test_default_construction_resolves_glm_5_2_capabilities() -> None:
+    # Regression test: capabilities=None must resolve from _CAPS_BY_MODEL by
+    # name, never fall through to the parent's Anthropic-Opus default.
+    m = _model()
+    assert m.capabilities == CAPS_GLM_5_2
+    assert m.capabilities.cache_control is False
+    assert m.capabilities.context_window == 1_048_576
+    assert m.capabilities.max_output_tokens == 131_072
+
+
+def test_kimi_k3_with_no_explicit_capabilities_resolves_from_name() -> None:
+    m = _model(name=KIMI_K3)
+    assert m.capabilities == CAPS_KIMI_K3
+
+
+def test_unknown_model_name_with_no_capabilities_raises_config_error() -> None:
+    with pytest.raises(ConfigError):
+        _model(name="some/other-model")
+
+
+def test_unknown_model_name_with_explicit_capabilities_constructs_fine() -> None:
+    caps = ModelCapabilities(
+        parallel_tool_calls=True,
+        thinking=False,
+        cache_control=False,
+        vision=False,
+        audio_input=False,
+        audio_output=False,
+        structured_output=True,
+        context_window=32_768,
+        max_output_tokens=8_192,
+        supports_compaction=False,
+    )
+    m = _model(name="some/other-model", capabilities=caps)
+    assert m.capabilities is caps
+
+
+# --- tests: extra_body routing reaches the SDK call (Finding 2) ------------
+
+
+class _FakeStreamEvent:
+    def __init__(self, **kw: Any) -> None:
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+class _FakeStream:
+    def __init__(self, events: list[_FakeStreamEvent]) -> None:
+        self._events = events
+
+    async def __aenter__(self) -> _FakeStream:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+    def __aiter__(self) -> AsyncIterator[_FakeStreamEvent]:
+        async def _gen() -> AsyncIterator[_FakeStreamEvent]:
+            for e in self._events:
+                yield e
+
+        return _gen()
+
+
+def _build_fake_client(events: list[_FakeStreamEvent]) -> MagicMock:
+    client = MagicMock()
+    client.messages = MagicMock()
+    client.messages.stream = MagicMock(return_value=_FakeStream(events))
+    return client
+
+
+async def test_request_passes_routing_policy_through_to_the_sdk_call() -> None:
+    # test_payload_carries_the_default_routing_policy only proves _build_payload
+    # is correct in isolation; this drives the full async request() path
+    # against a fake client so a future change that filters payload keys or
+    # swaps SDK methods before the call would fail here even if it left
+    # _build_payload untouched.
+    events = [
+        _FakeStreamEvent(type="message_start", message=_FakeStreamEvent(id="msg_1")),
+        _FakeStreamEvent(type="message_stop", message=None),
+    ]
+    client = _build_fake_client(events)
+    provider = OpenRouterProvider(client=client)
+    model = OpenRouterModel(provider=provider, name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+
+    async for _ in model.request([], [], ModelSettings()):
+        pass
+
+    assert client.messages.stream.called
+    _, kwargs = client.messages.stream.call_args
+    assert "extra_body" in kwargs
+    assert kwargs["extra_body"]["provider"] == US_FP8_ZDR.to_wire()
