@@ -78,6 +78,7 @@ Anthropic model adapter drives it directly. Every request carries a routing
 policy restricting which upstream providers may serve it:
 
 ```python
+from agent_harness import Agent
 from agent_harness.providers.openrouter import (
     CAPS_GLM_5_2, GLM_5_2, OpenRouterModel, OpenRouterProvider,
 )
