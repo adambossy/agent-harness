@@ -31,6 +31,7 @@ from agent_harness.core.models import (
     ModelSettings,
     Provider,
     TextBlock,
+    ThinkingBlock,
     ToolCallBlock,
     ToolResultBlock,
 )
@@ -397,3 +398,99 @@ def test_usage_from_returns_none_for_none() -> None:
 # Confirm the module is importable without the SDK present.
 def test_module_imports_without_sdk() -> None:
     assert anthropic_mod is not None
+
+
+# --- tests: thinking-block signature round-trip -----------------------------
+
+
+def test_signature_delta_is_captured_into_the_thinking_block() -> None:
+    """Claude models stream a real signature; it must survive into the block.
+
+    GLM-5.2 and Kimi K3 cannot exercise this — they emit an empty signature and
+    never send a signature_delta — so the non-empty path is pinned here.
+    """
+    events = [
+        _FakeStreamEvent(type="message_start", message=_FakeStreamEvent(id="msg_1")),
+        _FakeStreamEvent(
+            type="content_block_start",
+            index=0,
+            content_block=_FakeStreamEvent(type="thinking", thinking="", signature=""),
+        ),
+        _FakeStreamEvent(
+            type="content_block_delta",
+            index=0,
+            delta=_FakeStreamEvent(type="thinking_delta", thinking="weighing it up"),
+        ),
+        _FakeStreamEvent(
+            type="content_block_delta",
+            index=0,
+            delta=_FakeStreamEvent(type="signature_delta", signature="ErUBCkYIAxgCIkC0zzz"),
+        ),
+        _FakeStreamEvent(type="content_block_stop", index=0),
+        _FakeStreamEvent(type="message_stop", message=None),
+    ]
+    model = AnthropicMessagesModel(provider=AnthropicProvider(client=_build_fake_client(events)))
+
+    async def _collect() -> Message:
+        final: Any = None
+        async for ev in model.request(
+            [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
+            [],
+            ModelSettings(),
+        ):
+            if type(ev).__name__ == "MessageEnd":
+                final = ev
+        return cast(Message, final.final)
+
+    import asyncio
+
+    msg = asyncio.run(_collect())
+    blocks = [b for b in msg.content if isinstance(b, ThinkingBlock)]
+    assert len(blocks) == 1
+    assert blocks[0].text == "weighing it up"
+    assert blocks[0].signature == "ErUBCkYIAxgCIkC0zzz"
+
+
+def test_signature_defaults_to_empty_when_the_stream_sends_none() -> None:
+    # OpenRouter-served GLM-5.2 / Kimi K3 shape: signature "" on
+    # content_block_start, no signature_delta ever.
+    events = [
+        _FakeStreamEvent(type="message_start", message=_FakeStreamEvent(id="msg_1")),
+        _FakeStreamEvent(
+            type="content_block_start",
+            index=0,
+            content_block=_FakeStreamEvent(type="thinking", thinking="", signature=""),
+        ),
+        _FakeStreamEvent(
+            type="content_block_delta",
+            index=0,
+            delta=_FakeStreamEvent(type="thinking_delta", thinking="reasoning"),
+        ),
+        _FakeStreamEvent(type="content_block_stop", index=0),
+        _FakeStreamEvent(type="message_stop", message=None),
+    ]
+    model = AnthropicMessagesModel(provider=AnthropicProvider(client=_build_fake_client(events)))
+
+    async def _collect() -> Message:
+        final: Any = None
+        async for ev in model.request(
+            [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
+            [],
+            ModelSettings(),
+        ):
+            if type(ev).__name__ == "MessageEnd":
+                final = ev
+        return cast(Message, final.final)
+
+    import asyncio
+
+    msg = asyncio.run(_collect())
+    blocks = [b for b in msg.content if isinstance(b, ThinkingBlock)]
+    assert blocks[0].signature == ""
+
+
+def test_thinking_block_serializes_with_its_signature() -> None:
+    # Omitting "signature" 400s with "expected string, received undefined"
+    # whenever a thinking block is replayed in history.
+    wire = AnthropicMessagesModel._block_to_wire(ThinkingBlock(text="t", signature="sig-abc"))
+    assert wire == {"type": "thinking", "thinking": "t", "signature": "sig-abc"}

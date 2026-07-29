@@ -329,6 +329,8 @@ async def test_request_passes_routing_policy_through_to_the_sdk_call() -> None:
 
 
 def test_thinking_blocks_carry_a_signature_field() -> None:
+    # Behaviour now lives on the parent adapter; asserted here too because
+    # GLM/K3 reason on every turn, so this path is exercised hardest here.
     # The parent emits {"type": "thinking", ...} with no "signature", which the
     # Anthropic Messages schema requires. Echoing one back 400s on the second
     # turn of every tool-calling loop, because GLM/K3 reason on every turn.

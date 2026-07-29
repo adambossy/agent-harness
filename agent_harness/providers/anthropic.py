@@ -238,7 +238,14 @@ class AnthropicMessagesModel:
                 "content": block.content,
             }
         if isinstance(block, ThinkingBlock):
-            return {"type": "thinking", "thinking": block.text}
+            # "signature" is required by the Messages schema whenever a
+            # thinking block is replayed in history; omitting it 400s with
+            # "expected string, received undefined".
+            return {
+                "type": "thinking",
+                "thinking": block.text,
+                "signature": block.signature,
+            }
         return None  # ImageBlock support intentionally omitted in v1
 
     @classmethod
@@ -346,6 +353,7 @@ class AnthropicMessagesModel:
         message_id: str = ""
         text_acc = ""
         thinking_acc = ""
+        thinking_sig = ""
         tool_args_acc: dict[int, str] = {}
         tool_meta: dict[int, dict[str, str]] = {}
         usage = Usage()
@@ -369,6 +377,7 @@ class AnthropicMessagesModel:
                             tool_meta[idx] = {"id": tcid, "name": tname}
                             yield ToolCallStart(tool_call_id=tcid, tool_name=tname)
                         elif btype == "thinking":
+                            thinking_sig = getattr(block, "signature", "") or ""
                             yield ThinkingStart(message_id=message_id)
                     elif ev_type == "content_block_delta":
                         delta = getattr(ev, "delta", None)
@@ -388,6 +397,8 @@ class AnthropicMessagesModel:
                             tool_args_acc[idx] = tool_args_acc.get(idx, "") + piece
                             meta = tool_meta.get(idx, {"id": "", "name": ""})
                             yield ToolCallDelta(tool_call_id=meta["id"], arguments_delta=piece)
+                        elif dtype == "signature_delta":
+                            thinking_sig = getattr(delta, "signature", "") or thinking_sig
                         elif dtype == "thinking_delta":
                             piece = getattr(delta, "thinking", "") or ""
                             thinking_acc += piece
@@ -412,7 +423,7 @@ class AnthropicMessagesModel:
                             usage = usage + Usage(output_tokens=int(u))
                     elif ev_type == "message_stop":
                         final = _build_final_message(
-                            text_acc, thinking_acc, tool_meta, tool_args_acc
+                            text_acc, thinking_acc, tool_meta, tool_args_acc, thinking_sig
                         )
                         # Pull usage from final message if present.
                         msg_obj = getattr(ev, "message", None) or getattr(
@@ -434,7 +445,9 @@ class AnthropicMessagesModel:
         if not finalised:
             # Stream closed without a message_stop — synthesise a graceful end
             # so downstream consumers don't hang.
-            final = _build_final_message(text_acc, thinking_acc, tool_meta, tool_args_acc)
+            final = _build_final_message(
+                text_acc, thinking_acc, tool_meta, tool_args_acc, thinking_sig
+            )
             yield MessageEnd(message_id=message_id, final=final, usage=usage)
             yield ModelEnd(message_id=message_id, usage=usage)
 
@@ -464,10 +477,11 @@ def _build_final_message(
     thinking: str,
     tool_meta: dict[int, dict[str, str]],
     tool_args: dict[int, str],
+    thinking_signature: str = "",
 ) -> Message:
     blocks: list[Any] = []
     if thinking:
-        blocks.append(ThinkingBlock(text=thinking))
+        blocks.append(ThinkingBlock(text=thinking, signature=thinking_signature))
     if text:
         blocks.append(TextBlock(text=text))
     for idx, meta in sorted(tool_meta.items()):
