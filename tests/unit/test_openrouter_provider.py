@@ -328,11 +328,17 @@ async def test_request_passes_routing_policy_through_to_the_sdk_call() -> None:
     assert kwargs["extra_body"]["provider"] == US_FP8_ZDR.to_wire()
 
 
-def test_thinking_blocks_are_dropped_from_outgoing_history() -> None:
+def test_thinking_blocks_carry_a_signature_field() -> None:
     # The parent emits {"type": "thinking", ...} with no "signature", which the
     # Anthropic Messages schema requires. Echoing one back 400s on the second
     # turn of every tool-calling loop, because GLM/K3 reason on every turn.
-    assert OpenRouterModel._block_to_wire(ThinkingBlock(text="deliberating")) is None
+    # Emitting the field (empty is accepted for these models) keeps the model
+    # seeing its own prior reasoning rather than having it stripped.
+    assert OpenRouterModel._block_to_wire(ThinkingBlock(text="deliberating")) == {
+        "type": "thinking",
+        "thinking": "deliberating",
+        "signature": "",
+    }
 
 
 def test_non_thinking_blocks_still_serialize() -> None:
@@ -340,7 +346,7 @@ def test_non_thinking_blocks_still_serialize() -> None:
     assert wire == {"type": "text", "text": "hello"}
 
 
-def test_history_with_a_thinking_block_serializes_without_it() -> None:
+def test_history_preserves_thinking_blocks() -> None:
     msgs = [
         Message(
             role="assistant",
@@ -349,4 +355,12 @@ def test_history_with_a_thinking_block_serializes_without_it() -> None:
         )
     ]
     _system, wire = OpenRouterModel._messages_to_wire(msgs)
-    assert wire == [{"role": "assistant", "content": [{"type": "text", "text": "answer"}]}]
+    assert wire == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "hmm", "signature": ""},
+                {"type": "text", "text": "answer"},
+            ],
+        }
+    ]

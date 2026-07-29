@@ -237,23 +237,30 @@ class OpenRouterModel(AnthropicMessagesModel):
 
     @staticmethod
     def _block_to_wire(block: Any) -> dict[str, Any] | None:
-        """Serialize a content block, dropping thinking traces from history.
+        """Serialize a content block, keeping thinking traces round-trippable.
 
         The parent emits ``{"type": "thinking", "thinking": …}`` with no
-        ``signature``, which the Anthropic Messages schema requires. Echoing a
-        thinking block back therefore 400s with *"messages.N.content:
+        ``signature``, which the Anthropic Messages schema requires — so
+        echoing a thinking block back 400s with *"messages.N.content:
         signature — expected string, received undefined"*. That fires on the
         second turn of every tool-calling loop here, because GLM-5.2 and
         Kimi K3 reason on every turn.
 
-        The harness never captures a signature (``ThinkingBlock`` has no such
-        field), so it cannot round-trip one. Dropping the block is the correct
-        contained fix: the reasoning is model-internal, and the decisions it
-        produced still reach the model as the text and tool_use blocks beside
-        it. ``_messages_to_wire`` skips blocks that serialize to ``None``.
+        Adding the field fixes it. The models OpenRouter serves here emit an
+        empty signature (verified: ``content_block_start`` carries
+        ``"signature": ""`` and no ``signature_delta`` ever arrives), and the
+        API accepts an empty string, so the model keeps seeing its own prior
+        reasoning instead of having it stripped from history.
+
+        Claude models reached *through* OpenRouter do emit a real
+        ``signature_delta``, which the parent adapter does not capture and
+        ``ThinkingBlock`` cannot hold. Sending an empty signature for one of
+        those would be rejected. Preserving real signatures needs a
+        ``signature`` field on ``ThinkingBlock`` plus capture in the parent
+        stream loop — a core-and-all-providers change, tracked separately.
         """
         if isinstance(block, ThinkingBlock):
-            return None
+            return {"type": "thinking", "thinking": block.text, "signature": ""}
         return AnthropicMessagesModel._block_to_wire(block)
 
     def _build_payload(
