@@ -69,6 +69,9 @@ _CAPS_OPUS_4_7 = ModelCapabilities(
     context_window=1_000_000,
     max_output_tokens=64_000,
     supports_compaction=False,
+    # claude-opus-4-7 is one of the models that rejects budget_tokens with a
+    # 400; without this the module's own default model cannot think at all.
+    adaptive_thinking=True,
 )
 
 
@@ -362,8 +365,13 @@ class AnthropicMessagesModel:
 
         message_id: str = ""
         text_acc = ""
-        thinking_acc = ""
-        thinking_sig = ""
+        # Keyed by content-block index: a turn can contain several thinking
+        # blocks (interleaved thinking around tool calls), and Anthropic
+        # verifies each signature against its own block's text — so a single
+        # accumulator would concatenate the texts and keep only the last
+        # signature, producing a block that 400s on replay.
+        thinking_acc: dict[int, str] = {}
+        thinking_sig: dict[int, str] = {}
         tool_args_acc: dict[int, str] = {}
         tool_meta: dict[int, dict[str, str]] = {}
         usage = Usage()
@@ -387,7 +395,8 @@ class AnthropicMessagesModel:
                             tool_meta[idx] = {"id": tcid, "name": tname}
                             yield ToolCallStart(tool_call_id=tcid, tool_name=tname)
                         elif btype == "thinking":
-                            thinking_sig = getattr(block, "signature", "") or ""
+                            thinking_acc.setdefault(idx, "")
+                            thinking_sig[idx] = getattr(block, "signature", "") or ""
                             yield ThinkingStart(message_id=message_id)
                     elif ev_type == "content_block_delta":
                         delta = getattr(ev, "delta", None)
@@ -408,12 +417,14 @@ class AnthropicMessagesModel:
                             meta = tool_meta.get(idx, {"id": "", "name": ""})
                             yield ToolCallDelta(tool_call_id=meta["id"], arguments_delta=piece)
                         elif dtype == "signature_delta":
-                            thinking_sig = getattr(delta, "signature", "") or thinking_sig
+                            sig = getattr(delta, "signature", "") or ""
+                            if sig:
+                                thinking_sig[idx] = sig
                         elif dtype == "thinking_delta":
                             piece = getattr(delta, "thinking", "") or ""
-                            thinking_acc += piece
+                            thinking_acc[idx] = thinking_acc.get(idx, "") + piece
                             yield ThinkingDelta(
-                                message_id=message_id, delta=piece, partial=thinking_acc
+                                message_id=message_id, delta=piece, partial=thinking_acc[idx]
                             )
                     elif ev_type == "content_block_stop":
                         idx = getattr(ev, "index", 0)
@@ -425,7 +436,7 @@ class AnthropicMessagesModel:
                                 tool_name=meta["name"],
                                 arguments=args,
                             )
-                        elif thinking_acc:
+                        elif idx in thinking_acc:
                             yield ThinkingEnd(message_id=message_id)
                     elif ev_type == "message_delta":
                         u = getattr(getattr(ev, "usage", None), "output_tokens", None)
@@ -433,7 +444,10 @@ class AnthropicMessagesModel:
                             usage = usage + Usage(output_tokens=int(u))
                     elif ev_type == "message_stop":
                         final = _build_final_message(
-                            text_acc, thinking_acc, tool_meta, tool_args_acc, thinking_sig
+                            text_acc,
+                            _thinking_pairs(thinking_acc, thinking_sig),
+                            tool_meta,
+                            tool_args_acc,
                         )
                         # Pull usage from final message if present.
                         msg_obj = getattr(ev, "message", None) or getattr(
@@ -456,7 +470,10 @@ class AnthropicMessagesModel:
             # Stream closed without a message_stop — synthesise a graceful end
             # so downstream consumers don't hang.
             final = _build_final_message(
-                text_acc, thinking_acc, tool_meta, tool_args_acc, thinking_sig
+                text_acc,
+                _thinking_pairs(thinking_acc, thinking_sig),
+                tool_meta,
+                tool_args_acc,
             )
             yield MessageEnd(message_id=message_id, final=final, usage=usage)
             yield ModelEnd(message_id=message_id, usage=usage)
@@ -482,19 +499,25 @@ def _parse_json_args(raw: str) -> dict[str, Any]:
     return {"_value": parsed}
 
 
+def _thinking_pairs(acc: dict[int, str], sig: dict[int, str]) -> list[tuple[str, str]]:
+    """(text, signature) per thinking block, in content-block order."""
+    return [(acc.get(i, ""), sig.get(i, "")) for i in sorted(acc)]
+
+
 def _build_final_message(
     text: str,
-    thinking: str,
+    thinking: list[tuple[str, str]],
     tool_meta: dict[int, dict[str, str]],
     tool_args: dict[int, str],
-    thinking_signature: str = "",
 ) -> Message:
     blocks: list[Any] = []
-    if thinking or thinking_signature:
+    for thought, signature in thinking:
+        if not thought and not signature:
+            continue
         # A signature with no text is the normal shape when display is
         # "omitted" — the reasoning happened and must still be replayed, so
         # dropping the block here would lose the signature the next turn needs.
-        blocks.append(ThinkingBlock(text=thinking, signature=thinking_signature))
+        blocks.append(ThinkingBlock(text=thought, signature=signature))
     if text:
         blocks.append(TextBlock(text=text))
     for idx, meta in sorted(tool_meta.items()):
