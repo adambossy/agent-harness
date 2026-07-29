@@ -326,10 +326,20 @@ class AnthropicMessagesModel:
         ):
             payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
         if self.capabilities.thinking and settings.thinking_budget is not None:
-            payload["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": settings.thinking_budget,
-            }
+            if self.capabilities.adaptive_thinking:
+                # Claude 4.7+ rejects budget_tokens with a 400 naming the
+                # replacement. The budget is only an opt-in signal here; depth
+                # is controlled by output_config.effort, which a caller sets
+                # through ModelSettings.extra. "summarized" is deliberate: the
+                # API default is "omitted", which streams thinking blocks whose
+                # text is empty — invisible reasoning defeats the point of
+                # asking for it. Billing is identical either way.
+                payload["thinking"] = {"type": "adaptive", "display": "summarized"}
+            else:
+                payload["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": settings.thinking_budget,
+                }
         # Provider-specific carry-through.
         # OpenRouterModel._build_payload (subclass) depends on this merge
         # happening here, before it reads payload back from super().
@@ -480,7 +490,10 @@ def _build_final_message(
     thinking_signature: str = "",
 ) -> Message:
     blocks: list[Any] = []
-    if thinking:
+    if thinking or thinking_signature:
+        # A signature with no text is the normal shape when display is
+        # "omitted" — the reasoning happened and must still be replayed, so
+        # dropping the block here would lose the signature the next turn needs.
         blocks.append(ThinkingBlock(text=thinking, signature=thinking_signature))
     if text:
         blocks.append(TextBlock(text=text))
