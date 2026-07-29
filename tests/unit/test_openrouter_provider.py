@@ -8,10 +8,7 @@ from __future__ import annotations
 
 import sys
 import types
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Any, cast
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -37,6 +34,11 @@ from agent_harness.providers.openrouter import (
     OpenRouterModel,
     OpenRouterProvider,
     RoutingPolicy,
+)
+from tests.anthropic_sdk_fakes import (
+    _build_fake_client,
+    _FakeStreamEvent,
+    _ts,
 )
 
 # NOTE: keep this import block minimal — ruff runs on commit, so an import
@@ -109,13 +111,24 @@ def _fake_anthropic_module() -> types.ModuleType:
     return mod
 
 
+@pytest.fixture
+def fake_anthropic(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
+    """Install the stub SDK for the duration of a test and hand it back.
+
+    Five provider tests need the same stub-and-patch pair; keeping it in one
+    place means a change to what the stub records is a single edit.
+    """
+    mod = _fake_anthropic_module()
+    monkeypatch.setitem(sys.modules, "anthropic", mod)
+    return mod
+
+
 def test_provider_name_is_openrouter() -> None:
     assert OpenRouterProvider.name == "openrouter"
 
 
-def test_provider_defaults_to_openrouter_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = _fake_anthropic_module()
-    monkeypatch.setitem(sys.modules, "anthropic", mod)
+def test_provider_defaults_to_openrouter_base_url(fake_anthropic: types.ModuleType) -> None:
+    mod = fake_anthropic
     OpenRouterProvider(api_key="sk-or-test")
     assert mod.captured["base_url"] == OPENROUTER_BASE_URL
     assert mod.captured["api_key"] == "sk-or-test"
@@ -139,30 +152,24 @@ def test_base_url_resolves_to_the_anthropic_messages_endpoint() -> None:
     assert resolved == "https://openrouter.ai/api/v1/messages"
 
 
-def test_provider_honours_explicit_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = _fake_anthropic_module()
-    monkeypatch.setitem(sys.modules, "anthropic", mod)
+def test_provider_honours_explicit_base_url(fake_anthropic: types.ModuleType) -> None:
+    mod = fake_anthropic
     OpenRouterProvider(api_key="sk-or-test", base_url="https://proxy.example/v1")
     assert mod.captured["base_url"] == "https://proxy.example/v1"
 
 
-def test_provider_accepts_openrouter_credential(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = _fake_anthropic_module()
-    monkeypatch.setitem(sys.modules, "anthropic", mod)
+def test_provider_accepts_openrouter_credential(fake_anthropic: types.ModuleType) -> None:
+    mod = fake_anthropic
     OpenRouterProvider(credential=ApiKeyCredential(provider="openrouter", key="sk-or-1"))
     assert mod.captured["api_key"] == "sk-or-1"
 
 
-def test_provider_rejects_anthropic_credential(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = _fake_anthropic_module()
-    monkeypatch.setitem(sys.modules, "anthropic", mod)
+def test_provider_rejects_anthropic_credential(fake_anthropic: types.ModuleType) -> None:
     with pytest.raises(ConfigError):
         OpenRouterProvider(credential=ApiKeyCredential(provider="anthropic", key="sk-ant-1"))
 
 
-def test_provider_rejects_oauth_credential(monkeypatch: pytest.MonkeyPatch) -> None:
-    mod = _fake_anthropic_module()
-    monkeypatch.setitem(sys.modules, "anthropic", mod)
+def test_provider_rejects_oauth_credential(fake_anthropic: types.ModuleType) -> None:
     with pytest.raises(NotSupportedError):
         OpenRouterProvider(credential=OAuthCredential(provider="openrouter", access_token="t"))
 
@@ -180,10 +187,6 @@ def test_provider_satisfies_protocol() -> None:
 
 def _model(**kw: Any) -> OpenRouterModel:
     return OpenRouterModel(provider=OpenRouterProvider(client=object()), **kw)
-
-
-def _ts() -> datetime:
-    return datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def _msgs() -> list[Message]:
@@ -272,37 +275,6 @@ def test_unknown_model_name_with_explicit_capabilities_constructs_fine() -> None
 
 
 # --- tests: extra_body routing reaches the SDK call (Finding 2) ------------
-
-
-class _FakeStreamEvent:
-    def __init__(self, **kw: Any) -> None:
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-
-class _FakeStream:
-    def __init__(self, events: list[_FakeStreamEvent]) -> None:
-        self._events = events
-
-    async def __aenter__(self) -> _FakeStream:
-        return self
-
-    async def __aexit__(self, *_: Any) -> None:
-        return None
-
-    def __aiter__(self) -> AsyncIterator[_FakeStreamEvent]:
-        async def _gen() -> AsyncIterator[_FakeStreamEvent]:
-            for e in self._events:
-                yield e
-
-        return _gen()
-
-
-def _build_fake_client(events: list[_FakeStreamEvent]) -> MagicMock:
-    client = MagicMock()
-    client.messages = MagicMock()
-    client.messages.stream = MagicMock(return_value=_FakeStream(events))
-    return client
 
 
 async def test_request_passes_routing_policy_through_to_the_sdk_call() -> None:

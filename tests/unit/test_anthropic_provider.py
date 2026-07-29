@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import sys
 import types
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -44,45 +42,11 @@ from agent_harness.providers.anthropic import (
     _parse_json_args,
     _usage_from,
 )
-
-
-def _ts() -> datetime:
-    return datetime(2026, 1, 1, tzinfo=UTC)
-
-
-# --- fake SDK stream --------------------------------------------------------
-
-
-class _FakeStreamEvent:
-    def __init__(self, **kw: Any) -> None:
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-
-class _FakeStream:
-    def __init__(self, events: list[_FakeStreamEvent]) -> None:
-        self._events = events
-
-    async def __aenter__(self) -> _FakeStream:
-        return self
-
-    async def __aexit__(self, *_: Any) -> None:
-        return None
-
-    def __aiter__(self) -> AsyncIterator[_FakeStreamEvent]:
-        async def _gen() -> AsyncIterator[_FakeStreamEvent]:
-            for e in self._events:
-                yield e
-
-        return _gen()
-
-
-def _build_fake_client(events: list[_FakeStreamEvent]) -> MagicMock:
-    client = MagicMock()
-    client.messages = MagicMock()
-    client.messages.stream = MagicMock(return_value=_FakeStream(events))
-    return client
-
+from tests.anthropic_sdk_fakes import (
+    _build_fake_client,
+    _FakeStreamEvent,
+    _ts,
+)
 
 # --- tests: provider construction ------------------------------------------
 
@@ -211,6 +175,14 @@ def test_message_metadata_carries_cache_control() -> None:
 
 
 # --- tests: streaming → ModelEvent translation -----------------------------
+
+
+async def _final_message(model: AnthropicMessagesModel) -> Message:
+    """The MessageEnd payload from a streamed turn — what the next turn replays."""
+    for ev in await _collect(model):
+        if type(ev).__name__ == "MessageEnd":
+            return cast(Message, ev.final)
+    raise AssertionError("stream produced no MessageEnd")
 
 
 async def _collect(model: AnthropicMessagesModel) -> list[Any]:
@@ -403,7 +375,7 @@ def test_module_imports_without_sdk() -> None:
 # --- tests: thinking-block signature round-trip -----------------------------
 
 
-def test_signature_delta_is_captured_into_the_thinking_block() -> None:
+async def test_signature_delta_is_captured_into_the_thinking_block() -> None:
     """Claude models stream a real signature; it must survive into the block.
 
     GLM-5.2 and Kimi K3 cannot exercise this — they emit an empty signature and
@@ -431,27 +403,14 @@ def test_signature_delta_is_captured_into_the_thinking_block() -> None:
     ]
     model = AnthropicMessagesModel(provider=AnthropicProvider(client=_build_fake_client(events)))
 
-    async def _collect() -> Message:
-        final: Any = None
-        async for ev in model.request(
-            [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
-            [],
-            ModelSettings(),
-        ):
-            if type(ev).__name__ == "MessageEnd":
-                final = ev
-        return cast(Message, final.final)
-
-    import asyncio
-
-    msg = asyncio.run(_collect())
+    msg = await _final_message(model)
     blocks = [b for b in msg.content if isinstance(b, ThinkingBlock)]
     assert len(blocks) == 1
     assert blocks[0].text == "weighing it up"
     assert blocks[0].signature == "ErUBCkYIAxgCIkC0zzz"
 
 
-def test_signature_defaults_to_empty_when_the_stream_sends_none() -> None:
+async def test_signature_defaults_to_empty_when_the_stream_sends_none() -> None:
     # OpenRouter-served GLM-5.2 / Kimi K3 shape: signature "" on
     # content_block_start, no signature_delta ever.
     events = [
@@ -471,20 +430,7 @@ def test_signature_defaults_to_empty_when_the_stream_sends_none() -> None:
     ]
     model = AnthropicMessagesModel(provider=AnthropicProvider(client=_build_fake_client(events)))
 
-    async def _collect() -> Message:
-        final: Any = None
-        async for ev in model.request(
-            [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
-            [],
-            ModelSettings(),
-        ):
-            if type(ev).__name__ == "MessageEnd":
-                final = ev
-        return cast(Message, final.final)
-
-    import asyncio
-
-    msg = asyncio.run(_collect())
+    msg = await _final_message(model)
     blocks = [b for b in msg.content if isinstance(b, ThinkingBlock)]
     assert blocks[0].signature == ""
 
