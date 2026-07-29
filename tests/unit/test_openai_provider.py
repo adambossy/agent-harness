@@ -174,7 +174,7 @@ def test_build_payload_maps_settings_and_extra() -> None:
     assert payload["temperature"] == 0.1
     assert payload["top_p"] == 0.9
     assert payload["parallel_tool_calls"] is True
-    assert payload["reasoning"] == {"effort": "medium"}
+    assert payload["reasoning"] == {"effort": "medium", "summary": "auto"}
     assert payload["previous_response_id"] == "resp_123"
 
 
@@ -344,3 +344,20 @@ def test_parse_json_args_handles_invalid_input() -> None:
 
 def test_module_imports_without_sdk() -> None:
     assert openai_mod is not None
+
+
+def test_reasoning_payload_requests_a_summary() -> None:
+    """Without "summary" the Responses API returns no reasoning text at all.
+
+    Verified live against gpt-5.5: `reasoning={"effort": "medium"}` yields zero
+    reasoning_summary_text deltas, so the adapter's handler for them never
+    fires; adding `"summary": "auto"` yields them. Pin the opt-in.
+    """
+    m = OpenAIResponsesModel(provider=OpenAIProvider(client=MagicMock()))
+    payload = m._build_payload(
+        [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
+        [],
+        ModelSettings(thinking_budget=8000),
+    )
+    assert payload["reasoning"]["summary"] == "auto"
+    assert payload["reasoning"]["effort"] == "medium"
