@@ -522,3 +522,48 @@ def test_thinking_block_serializes_with_its_signature() -> None:
     # whenever a thinking block is replayed in history.
     wire = AnthropicMessagesModel._block_to_wire(ThinkingBlock(text="t", signature="sig-abc"))
     assert wire == {"type": "thinking", "thinking": "t", "signature": "sig-abc"}
+
+
+async def test_multiple_thinking_blocks_keep_their_own_text_and_signature() -> None:
+    """End-to-end: interleaved thinking must not collapse into one block.
+
+    Anthropic verifies each signature against its own block's text, so a
+    concatenated block carrying the last signature 400s on the next turn.
+    """
+
+    def _thinking(idx: int, text: str, sig: str) -> list[_FakeStreamEvent]:
+        return [
+            _FakeStreamEvent(
+                type="content_block_start",
+                index=idx,
+                content_block=_FakeStreamEvent(type="thinking", thinking="", signature=""),
+            ),
+            _FakeStreamEvent(
+                type="content_block_delta",
+                index=idx,
+                delta=_FakeStreamEvent(type="thinking_delta", thinking=text),
+            ),
+            _FakeStreamEvent(
+                type="content_block_delta",
+                index=idx,
+                delta=_FakeStreamEvent(type="signature_delta", signature=sig),
+            ),
+            _FakeStreamEvent(type="content_block_stop", index=idx),
+        ]
+
+    events = [
+        _FakeStreamEvent(type="message_start", message=_FakeStreamEvent(id="msg_1")),
+        *_thinking(0, "first", "sig-a"),
+        *_thinking(1, "second", "sig-b"),
+        _FakeStreamEvent(type="message_stop", message=None),
+    ]
+    model = AnthropicMessagesModel(provider=AnthropicProvider(client=_build_fake_client(events)))
+    out = await _collect(model)
+
+    final = next(e for e in out if type(e).__name__ == "MessageEnd").final
+    thoughts = [b for b in final.content if isinstance(b, ThinkingBlock)]
+    assert [(b.text, b.signature) for b in thoughts] == [("first", "sig-a"), ("second", "sig-b")]
+    # Each block's deltas are cumulative for that block only, never global.
+    assert [d.partial for d in out if isinstance(d, ThinkingDelta)] == ["first", "second"]
+    assert len([e for e in out if isinstance(e, ThinkingStart)]) == 2
+    assert len([e for e in out if isinstance(e, ThinkingEnd)]) == 2

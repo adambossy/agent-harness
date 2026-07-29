@@ -245,7 +245,11 @@ class OpenRouterModel(AnthropicMessagesModel):
         # doesn't matter, only that it happens before we read it here), so
         # anything the caller put in extra_body is already present; setdefault
         # leaves their policy intact.
-        raw_extra_body = payload.get("extra_body") or {}
+        # `or {}` would short-circuit here, silently coercing falsy non-dicts
+        # ([], "", 0) instead of rejecting them; only None means "absent".
+        raw_extra_body = payload.get("extra_body")
+        if raw_extra_body is None:
+            raw_extra_body = {}
         if not isinstance(raw_extra_body, dict):
             # dict("junk") raises a ValueError naming neither the field nor
             # this provider, three frames from where the caller went wrong.
