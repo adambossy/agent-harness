@@ -24,6 +24,7 @@ from agent_harness.core.models import (
     ModelSettings,
     Provider,
     TextBlock,
+    ThinkingBlock,
 )
 from agent_harness.providers.openrouter import (
     CAPS_GLM_5_2,
@@ -118,6 +119,24 @@ def test_provider_defaults_to_openrouter_base_url(monkeypatch: pytest.MonkeyPatc
     OpenRouterProvider(api_key="sk-or-test")
     assert mod.captured["base_url"] == OPENROUTER_BASE_URL
     assert mod.captured["api_key"] == "sk-or-test"
+
+
+def test_base_url_omits_the_version_segment() -> None:
+    # AsyncAnthropic appends "/v1/messages" to base_url. If OPENROUTER_BASE_URL
+    # carried its own "/v1", every request would go to "/api/v1/v1/messages"
+    # and get OpenRouter's HTML 404 instead of the API. This shipped green as
+    # "https://openrouter.ai/api/v1" until a live call caught it, so pin it.
+    assert OPENROUTER_BASE_URL == "https://openrouter.ai/api"
+    assert not OPENROUTER_BASE_URL.rstrip("/").endswith("/v1")
+
+
+def test_base_url_resolves_to_the_anthropic_messages_endpoint() -> None:
+    # The real SDK is needed to pin the FULLY RESOLVED URL; mocked tests cannot
+    # observe URL construction at all. Skipped when the extra is not installed.
+    anthropic = pytest.importorskip("anthropic")
+    client = anthropic.AsyncAnthropic(api_key="sk-or-test", base_url=OPENROUTER_BASE_URL)
+    resolved = str(client._prepare_url("/v1/messages"))
+    assert resolved == "https://openrouter.ai/api/v1/messages"
 
 
 def test_provider_honours_explicit_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,3 +326,27 @@ async def test_request_passes_routing_policy_through_to_the_sdk_call() -> None:
     _, kwargs = client.messages.stream.call_args
     assert "extra_body" in kwargs
     assert kwargs["extra_body"]["provider"] == US_FP8_ZDR.to_wire()
+
+
+def test_thinking_blocks_are_dropped_from_outgoing_history() -> None:
+    # The parent emits {"type": "thinking", ...} with no "signature", which the
+    # Anthropic Messages schema requires. Echoing one back 400s on the second
+    # turn of every tool-calling loop, because GLM/K3 reason on every turn.
+    assert OpenRouterModel._block_to_wire(ThinkingBlock(text="deliberating")) is None
+
+
+def test_non_thinking_blocks_still_serialize() -> None:
+    wire = OpenRouterModel._block_to_wire(TextBlock(text="hello"))
+    assert wire == {"type": "text", "text": "hello"}
+
+
+def test_history_with_a_thinking_block_serializes_without_it() -> None:
+    msgs = [
+        Message(
+            role="assistant",
+            content=[ThinkingBlock(text="hmm"), TextBlock(text="answer")],
+            timestamp=_ts(),
+        )
+    ]
+    _system, wire = OpenRouterModel._messages_to_wire(msgs)
+    assert wire == [{"role": "assistant", "content": [{"type": "text", "text": "answer"}]}]

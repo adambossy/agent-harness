@@ -15,7 +15,12 @@ from typing import Any, Literal
 
 from agent_harness.core.credentials import Credential, CredentialResolver
 from agent_harness.core.errors import ConfigError
-from agent_harness.core.models import Message, ModelCapabilities, ModelSettings
+from agent_harness.core.models import (
+    Message,
+    ModelCapabilities,
+    ModelSettings,
+    ThinkingBlock,
+)
 
 from .anthropic import AnthropicMessagesModel, AnthropicProvider
 
@@ -96,8 +101,16 @@ provider serves K3 until its open weights land, so any stricter policy
 matches zero endpoints and every request 404s.
 """
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-"""OpenRouter's API root. Its ``/messages`` path is Anthropic-compatible."""
+OPENROUTER_BASE_URL = "https://openrouter.ai/api"
+"""OpenRouter's API root, as the ``anthropic`` SDK wants it.
+
+Deliberately **not** ``https://openrouter.ai/api/v1``: ``AsyncAnthropic``
+appends ``/v1/messages`` to its ``base_url``, so the ``/v1`` must be omitted
+here or requests go to ``/api/v1/v1/messages`` and get OpenRouter's HTML 404
+page instead of the Anthropic-compatible endpoint. See
+``test_base_url_resolves_to_the_anthropic_messages_endpoint``, which pins the
+fully-resolved URL — mocked tests cannot catch this class of bug.
+"""
 
 
 class OpenRouterProvider(AnthropicProvider):
@@ -221,6 +234,27 @@ class OpenRouterModel(AnthropicMessagesModel):
                 )
         super().__init__(provider=provider, name=name, capabilities=capabilities)
         self.routing = routing if routing is not None else US_FP8_ZDR
+
+    @staticmethod
+    def _block_to_wire(block: Any) -> dict[str, Any] | None:
+        """Serialize a content block, dropping thinking traces from history.
+
+        The parent emits ``{"type": "thinking", "thinking": …}`` with no
+        ``signature``, which the Anthropic Messages schema requires. Echoing a
+        thinking block back therefore 400s with *"messages.N.content:
+        signature — expected string, received undefined"*. That fires on the
+        second turn of every tool-calling loop here, because GLM-5.2 and
+        Kimi K3 reason on every turn.
+
+        The harness never captures a signature (``ThinkingBlock`` has no such
+        field), so it cannot round-trip one. Dropping the block is the correct
+        contained fix: the reasoning is model-internal, and the decisions it
+        produced still reach the model as the text and tool_use blocks beside
+        it. ``_messages_to_wire`` skips blocks that serialize to ``None``.
+        """
+        if isinstance(block, ThinkingBlock):
+            return None
+        return AnthropicMessagesModel._block_to_wire(block)
 
     def _build_payload(
         self,

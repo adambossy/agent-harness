@@ -679,3 +679,38 @@ git commit -m "docs: OpenRouter provider usage"
   "no route matches" at construction instead of at request time.
 - **Penny consumption.** Penny pins `agent-harness@v0.2.0`; bumping that pin
   to use this provider is a separate change in the Penny repo.
+
+---
+
+## Post-merge corrections (2026-07-29, found by live end-to-end testing)
+
+Two Critical bugs that every mocked test passed over. Both are recorded here
+because the plan's own code blocks above contain the first one.
+
+1. **`OPENROUTER_BASE_URL` had a duplicated version segment.** Task 2's code
+   above sets it to `https://openrouter.ai/api/v1`. `AsyncAnthropic` appends
+   `/v1/messages` to `base_url`, so every request went to
+   `/api/v1/v1/messages` and received OpenRouter's HTML 404 page. Correct
+   value is `https://openrouter.ai/api`. Pinned now by
+   `test_base_url_resolves_to_the_anthropic_messages_endpoint`, which resolves
+   the URL through the real SDK.
+
+2. **Echoed thinking blocks 400 the request.** The Deferred section above
+   flagged this as unverified; it is real. `ThinkingBlock` has no `signature`
+   field and the parent emits `{"type": "thinking", "thinking": …}` without
+   one, which the Anthropic Messages schema requires — so the *second* turn of
+   every tool-calling loop failed with `messages.N.content: signature —
+   expected string, received undefined`. It fires on every tool call here
+   because GLM-5.2 and Kimi K3 reason on every turn. Fixed by overriding
+   `_block_to_wire` in `OpenRouterModel` to drop thinking blocks from outgoing
+   history.
+
+   The underlying defect is in the parent adapter and affects Anthropic's own
+   API with extended thinking + tools. A proper fix — adding `signature` to
+   `ThinkingBlock`, capturing it from the stream, replaying it — touches
+   `core/models.py` and all three providers, so it is left as its own change.
+
+**Live verification after both fixes** (real API, tool-calling agent loop):
+GLM-5.2 PASS (text 2.5s, tool 20.6s) · Kimi K3 PASS (text 18.5s, tool 19.6s) ·
+Opus 5 PASS (text 2.5s, tool 4.0s) · GPT-5.5 reached the API and returned a
+quota error, so the code path is confirmed and only billing blocked it.
