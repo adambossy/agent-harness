@@ -245,7 +245,15 @@ class OpenRouterModel(AnthropicMessagesModel):
         # doesn't matter, only that it happens before we read it here), so
         # anything the caller put in extra_body is already present; setdefault
         # leaves their policy intact.
-        extra_body: dict[str, Any] = dict(payload.get("extra_body") or {})
+        raw_extra_body = payload.get("extra_body") or {}
+        if not isinstance(raw_extra_body, dict):
+            # dict("junk") raises a ValueError naming neither the field nor
+            # this provider, three frames from where the caller went wrong.
+            raise ConfigError(
+                "ModelSettings.extra['extra_body'] must be a dict, got "
+                f"{type(raw_extra_body).__name__}"
+            )
+        extra_body: dict[str, Any] = dict(raw_extra_body)
         extra_body.setdefault("provider", self.routing.to_wire())
         payload["extra_body"] = extra_body
         return payload

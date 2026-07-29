@@ -303,11 +303,11 @@ async def test_request_passes_routing_policy_through_to_the_sdk_call() -> None:
 def test_thinking_blocks_carry_a_signature_field() -> None:
     # Behaviour now lives on the parent adapter; asserted here too because
     # GLM/K3 reason on every turn, so this path is exercised hardest here.
-    # The parent emits {"type": "thinking", ...} with no "signature", which the
-    # Anthropic Messages schema requires. Echoing one back 400s on the second
-    # turn of every tool-calling loop, because GLM/K3 reason on every turn.
-    # Emitting the field (empty is accepted for these models) keeps the model
-    # seeing its own prior reasoning rather than having it stripped.
+    # Before the fix, the parent omitted "signature" entirely, which the
+    # Messages schema requires whenever a thinking block is replayed — so the
+    # second turn of every tool-calling loop 400'd, and GLM/K3 reason on every
+    # turn. The serializer (inherited, not overridden here) now always emits
+    # the field; empty is the accepted value for these models.
     assert OpenRouterModel._block_to_wire(ThinkingBlock(text="deliberating")) == {
         "type": "thinking",
         "thinking": "deliberating",
@@ -338,3 +338,26 @@ def test_history_preserves_thinking_blocks() -> None:
             ],
         }
     ]
+
+
+def test_build_payload_does_not_mutate_the_callers_extra_body() -> None:
+    """ModelSettings can be shared across calls, so the copy is load-bearing.
+
+    Replacing the defensive copy with a bare reference would leak this call's
+    routing policy into the caller's dict and every later request built from it.
+    """
+    caller_extra_body: dict[str, Any] = {"transforms": ["middle-out"]}
+    settings = ModelSettings(extra={"extra_body": caller_extra_body})
+    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    payload = m._build_payload(_msgs(), [], settings)
+
+    assert payload["extra_body"]["provider"] == US_FP8_ZDR.to_wire()
+    assert caller_extra_body == {"transforms": ["middle-out"]}
+    assert "provider" not in caller_extra_body
+
+
+def test_build_payload_rejects_a_non_dict_extra_body() -> None:
+    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    settings = ModelSettings(extra={"extra_body": "junk"})
+    with pytest.raises(ConfigError, match="extra_body"):
+        m._build_payload(_msgs(), [], settings)
