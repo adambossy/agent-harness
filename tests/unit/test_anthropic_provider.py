@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import sys
 import types
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
@@ -31,11 +29,13 @@ from agent_harness.core.models import (
     ModelSettings,
     Provider,
     TextBlock,
+    ThinkingBlock,
     ToolCallBlock,
     ToolResultBlock,
 )
 from agent_harness.providers import anthropic as anthropic_mod
 from agent_harness.providers.anthropic import (
+    _CAPS_OPUS_4_7,
     OPUS_4_7,
     AnthropicMessagesModel,
     AnthropicProvider,
@@ -43,45 +43,11 @@ from agent_harness.providers.anthropic import (
     _parse_json_args,
     _usage_from,
 )
-
-
-def _ts() -> datetime:
-    return datetime(2026, 1, 1, tzinfo=UTC)
-
-
-# --- fake SDK stream --------------------------------------------------------
-
-
-class _FakeStreamEvent:
-    def __init__(self, **kw: Any) -> None:
-        for k, v in kw.items():
-            setattr(self, k, v)
-
-
-class _FakeStream:
-    def __init__(self, events: list[_FakeStreamEvent]) -> None:
-        self._events = events
-
-    async def __aenter__(self) -> _FakeStream:
-        return self
-
-    async def __aexit__(self, *_: Any) -> None:
-        return None
-
-    def __aiter__(self) -> AsyncIterator[_FakeStreamEvent]:
-        async def _gen() -> AsyncIterator[_FakeStreamEvent]:
-            for e in self._events:
-                yield e
-
-        return _gen()
-
-
-def _build_fake_client(events: list[_FakeStreamEvent]) -> MagicMock:
-    client = MagicMock()
-    client.messages = MagicMock()
-    client.messages.stream = MagicMock(return_value=_FakeStream(events))
-    return client
-
+from tests.anthropic_sdk_fakes import (
+    _build_fake_client,
+    _FakeStreamEvent,
+    _ts,
+)
 
 # --- tests: provider construction ------------------------------------------
 
@@ -184,8 +150,64 @@ def test_build_payload_respects_settings_and_capabilities() -> None:
     assert payload["top_p"] == 0.95
     assert payload["tools"] == tools
     assert payload["tool_choice"]["disable_parallel_tool_use"] is True
-    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 2_000}
+    assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert payload["metadata"] == {"trace_id": "t1"}
+
+
+def test_build_payload_uses_the_budget_shape_for_pre_4_7_models() -> None:
+    """Older Claude models still take budget_tokens; only 4.7+ rejects it."""
+    caps = _CAPS_OPUS_4_7.model_copy(update={"adaptive_thinking": False})
+    m = AnthropicMessagesModel(provider=AnthropicProvider(client=MagicMock()), capabilities=caps)
+    payload = m._build_payload(
+        [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
+        [],
+        ModelSettings(thinking_budget=2_000),
+    )
+    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 2_000}
+
+
+def test_build_payload_emits_adaptive_shape_without_a_budget() -> None:
+    """Claude 4.7+ 400s on budget_tokens, and display must be opted in.
+
+    The API default is display="omitted", which streams thinking blocks whose
+    text is empty — reasoning that never reaches the caller.
+    """
+    m = AnthropicMessagesModel(provider=AnthropicProvider(client=MagicMock()))
+    payload = m._build_payload(
+        [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
+        [],
+        ModelSettings(thinking_budget=2_000),
+    )
+    assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert "budget_tokens" not in payload["thinking"]
+
+
+async def test_signature_only_thinking_block_survives_with_a_close_event() -> None:
+    """The display="omitted" shape: a signature arrives, thinking text never does."""
+    events = [
+        _FakeStreamEvent(type="message_start", message=_FakeStreamEvent(id="msg_1")),
+        _FakeStreamEvent(
+            type="content_block_start",
+            index=0,
+            content_block=_FakeStreamEvent(type="thinking", thinking="", signature=""),
+        ),
+        _FakeStreamEvent(
+            type="content_block_delta",
+            index=0,
+            delta=_FakeStreamEvent(type="signature_delta", signature="sig-only"),
+        ),
+        _FakeStreamEvent(type="content_block_stop", index=0),
+        _FakeStreamEvent(type="message_stop", message=None),
+    ]
+    model = AnthropicMessagesModel(provider=AnthropicProvider(client=_build_fake_client(events)))
+    out = await _collect(model)
+    # The block must survive: dropping it loses the signature the next turn replays.
+    final = next(e for e in out if type(e).__name__ == "MessageEnd").final
+    thoughts = [b for b in final.content if isinstance(b, ThinkingBlock)]
+    assert [(b.text, b.signature) for b in thoughts] == [("", "sig-only")]
+    # ...and a started thinking region must still be closed for consumers.
+    assert len([e for e in out if isinstance(e, ThinkingStart)]) == 1
+    assert len([e for e in out if isinstance(e, ThinkingEnd)]) == 1
 
 
 def test_build_payload_drops_thinking_when_capability_off() -> None:
@@ -210,6 +232,14 @@ def test_message_metadata_carries_cache_control() -> None:
 
 
 # --- tests: streaming → ModelEvent translation -----------------------------
+
+
+async def _final_message(model: AnthropicMessagesModel) -> Message:
+    """The MessageEnd payload from a streamed turn — what the next turn replays."""
+    for ev in await _collect(model):
+        if type(ev).__name__ == "MessageEnd":
+            return cast(Message, ev.final)
+    raise AssertionError("stream produced no MessageEnd")
 
 
 async def _collect(model: AnthropicMessagesModel) -> list[Any]:
@@ -381,12 +411,37 @@ def test_parse_json_args_handles_invalid_input() -> None:
 def test_build_final_message_orders_thinking_text_then_calls() -> None:
     msg = _build_final_message(
         text="hi",
-        thinking="t",
+        thinking=[("t", "")],
         tool_meta={0: {"id": "c1", "name": "f"}},
         tool_args={0: '{"a":1}'},
     )
     kinds = [type(b).__name__ for b in msg.content]
     assert kinds == ["ThinkingBlock", "TextBlock", "ToolCallBlock"]
+
+
+def test_build_final_message_keeps_each_thinking_block_with_its_own_signature() -> None:
+    """A turn can hold several thinking blocks (interleaved thinking).
+
+    Anthropic verifies each signature against its own block's text, so
+    collapsing them into one block would carry the wrong signature and 400 on
+    the next turn.
+    """
+    msg = _build_final_message(
+        text="answer",
+        thinking=[("first", "sig-a"), ("second", "sig-b")],
+        tool_meta={},
+        tool_args={},
+    )
+    thoughts = [b for b in msg.content if isinstance(b, ThinkingBlock)]
+    assert [(b.text, b.signature) for b in thoughts] == [
+        ("first", "sig-a"),
+        ("second", "sig-b"),
+    ]
+
+
+def test_build_final_message_skips_wholly_empty_thinking_blocks() -> None:
+    msg = _build_final_message(text="answer", thinking=[("", "")], tool_meta={}, tool_args={})
+    assert [type(b).__name__ for b in msg.content] == ["TextBlock"]
 
 
 def test_usage_from_returns_none_for_none() -> None:
@@ -397,3 +452,118 @@ def test_usage_from_returns_none_for_none() -> None:
 # Confirm the module is importable without the SDK present.
 def test_module_imports_without_sdk() -> None:
     assert anthropic_mod is not None
+
+
+# --- tests: thinking-block signature round-trip -----------------------------
+
+
+async def test_signature_delta_is_captured_into_the_thinking_block() -> None:
+    """Claude models stream a real signature; it must survive into the block.
+
+    GLM-5.2 and Kimi K3 cannot exercise this — they emit an empty signature and
+    never send a signature_delta — so the non-empty path is pinned here.
+    """
+    events = [
+        _FakeStreamEvent(type="message_start", message=_FakeStreamEvent(id="msg_1")),
+        _FakeStreamEvent(
+            type="content_block_start",
+            index=0,
+            content_block=_FakeStreamEvent(type="thinking", thinking="", signature=""),
+        ),
+        _FakeStreamEvent(
+            type="content_block_delta",
+            index=0,
+            delta=_FakeStreamEvent(type="thinking_delta", thinking="weighing it up"),
+        ),
+        _FakeStreamEvent(
+            type="content_block_delta",
+            index=0,
+            delta=_FakeStreamEvent(type="signature_delta", signature="ErUBCkYIAxgCIkC0zzz"),
+        ),
+        _FakeStreamEvent(type="content_block_stop", index=0),
+        _FakeStreamEvent(type="message_stop", message=None),
+    ]
+    model = AnthropicMessagesModel(provider=AnthropicProvider(client=_build_fake_client(events)))
+
+    msg = await _final_message(model)
+    blocks = [b for b in msg.content if isinstance(b, ThinkingBlock)]
+    assert len(blocks) == 1
+    assert blocks[0].text == "weighing it up"
+    assert blocks[0].signature == "ErUBCkYIAxgCIkC0zzz"
+
+
+async def test_signature_defaults_to_empty_when_the_stream_sends_none() -> None:
+    # OpenRouter-served GLM-5.2 / Kimi K3 shape: signature "" on
+    # content_block_start, no signature_delta ever.
+    events = [
+        _FakeStreamEvent(type="message_start", message=_FakeStreamEvent(id="msg_1")),
+        _FakeStreamEvent(
+            type="content_block_start",
+            index=0,
+            content_block=_FakeStreamEvent(type="thinking", thinking="", signature=""),
+        ),
+        _FakeStreamEvent(
+            type="content_block_delta",
+            index=0,
+            delta=_FakeStreamEvent(type="thinking_delta", thinking="reasoning"),
+        ),
+        _FakeStreamEvent(type="content_block_stop", index=0),
+        _FakeStreamEvent(type="message_stop", message=None),
+    ]
+    model = AnthropicMessagesModel(provider=AnthropicProvider(client=_build_fake_client(events)))
+
+    msg = await _final_message(model)
+    blocks = [b for b in msg.content if isinstance(b, ThinkingBlock)]
+    assert blocks[0].signature == ""
+
+
+def test_thinking_block_serializes_with_its_signature() -> None:
+    # Omitting "signature" 400s with "expected string, received undefined"
+    # whenever a thinking block is replayed in history.
+    wire = AnthropicMessagesModel._block_to_wire(ThinkingBlock(text="t", signature="sig-abc"))
+    assert wire == {"type": "thinking", "thinking": "t", "signature": "sig-abc"}
+
+
+async def test_multiple_thinking_blocks_keep_their_own_text_and_signature() -> None:
+    """End-to-end: interleaved thinking must not collapse into one block.
+
+    Anthropic verifies each signature against its own block's text, so a
+    concatenated block carrying the last signature 400s on the next turn.
+    """
+
+    def _thinking(idx: int, text: str, sig: str) -> list[_FakeStreamEvent]:
+        return [
+            _FakeStreamEvent(
+                type="content_block_start",
+                index=idx,
+                content_block=_FakeStreamEvent(type="thinking", thinking="", signature=""),
+            ),
+            _FakeStreamEvent(
+                type="content_block_delta",
+                index=idx,
+                delta=_FakeStreamEvent(type="thinking_delta", thinking=text),
+            ),
+            _FakeStreamEvent(
+                type="content_block_delta",
+                index=idx,
+                delta=_FakeStreamEvent(type="signature_delta", signature=sig),
+            ),
+            _FakeStreamEvent(type="content_block_stop", index=idx),
+        ]
+
+    events = [
+        _FakeStreamEvent(type="message_start", message=_FakeStreamEvent(id="msg_1")),
+        *_thinking(0, "first", "sig-a"),
+        *_thinking(1, "second", "sig-b"),
+        _FakeStreamEvent(type="message_stop", message=None),
+    ]
+    model = AnthropicMessagesModel(provider=AnthropicProvider(client=_build_fake_client(events)))
+    out = await _collect(model)
+
+    final = next(e for e in out if type(e).__name__ == "MessageEnd").final
+    thoughts = [b for b in final.content if isinstance(b, ThinkingBlock)]
+    assert [(b.text, b.signature) for b in thoughts] == [("first", "sig-a"), ("second", "sig-b")]
+    # Each block's deltas are cumulative for that block only, never global.
+    assert [d.partial for d in out if isinstance(d, ThinkingDelta)] == ["first", "second"]
+    assert len([e for e in out if isinstance(e, ThinkingStart)]) == 2
+    assert len([e for e in out if isinstance(e, ThinkingEnd)]) == 2

@@ -71,6 +71,28 @@ result = asyncio.run(agent.run("What's the weather in Paris?"))
 print(result.output)  # -> e.g. "It's sunny in Paris."
 ```
 
+### OpenRouter (GLM-5.2, Kimi K3, …)
+
+OpenRouter's `/api/v1/messages` endpoint is Anthropic-compatible, so the
+Anthropic model adapter drives it directly. Every request carries a routing
+policy restricting which upstream providers may serve it:
+
+```python
+from agent_harness import Agent
+from agent_harness.providers.openrouter import (
+    CAPS_GLM_5_2, GLM_5_2, OpenRouterModel, OpenRouterProvider,
+)
+
+provider = OpenRouterProvider(api_key="sk-or-…")
+model = OpenRouterModel(provider=provider, name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+agent = Agent(name="assistant", model=model)
+```
+
+The default `US_FP8_ZDR` policy routes only to US-headquartered,
+FP8-or-better, zero-data-retention endpoints, cheapest first. For Kimi K3,
+pass `routing=MOONSHOT_DIRECT` — it has a single upstream endpoint
+(Singapore, int4), so the stricter default would match nothing.
+
 Swap the model for another provider (`agent_harness.providers.openai`,
 `.google`), persist history with a session
 (`from agent_harness.sessions import SqliteSession`), or run tools inside an

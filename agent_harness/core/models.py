@@ -101,6 +101,17 @@ class ThinkingBlock(BaseModel):
 
     type: Literal["thinking"] = "thinking"
     text: str
+    signature: str = ""
+    """Provider token authenticating the trace, replayed on later turns.
+
+    Anthropic requires a thinking block echoed back in history to carry the
+    ``signature`` it was issued with and rejects the request otherwise.
+    Providers that mint no signature round-trip the empty string — verified
+    accepted for OpenRouter-served GLM-5.2 and Kimi K3, which emit
+    ``"signature": ""`` and never send a ``signature_delta``. Defaults to
+    empty so the OpenAI and Google adapters, which have no such concept,
+    construct :class:`ThinkingBlock` unchanged.
+    """
 
 
 ContentBlock = Annotated[
@@ -252,6 +263,15 @@ class ModelCapabilities(BaseModel):
     context_window: int
     max_output_tokens: int | None = None
     supports_compaction: bool = False
+    adaptive_thinking: bool = False
+    """Model wants Anthropic's adaptive thinking shape rather than a token budget.
+
+    Claude 4.7 and later (Opus 5, Opus 4.8/4.7, Sonnet 5, Fable 5) removed
+    ``thinking: {"type": "enabled", "budget_tokens": N}`` — sending it returns
+    HTTP 400 telling you to use ``{"type": "adaptive"}`` with
+    ``output_config.effort``. Older Claude models, and the OpenRouter-served
+    open models, still take the budget shape, so this stays False by default.
+    """
 
 
 class ModelSettings(BaseModel):

@@ -303,7 +303,13 @@ class OpenAIResponsesModel:
             payload["parallel_tool_calls"] = settings.parallel_tool_calls
         if self.capabilities.thinking and settings.thinking_budget is not None:
             # Map budget → reasoning effort buckets (low/medium/high).
-            payload["reasoning"] = {"effort": _budget_to_effort(settings.thinking_budget)}
+            # "summary" is required to get any reasoning text back: without it
+            # the Responses API emits no reasoning_summary_text deltas at all,
+            # so the handler below is dead code and thinking events never fire.
+            payload["reasoning"] = {
+                "effort": _budget_to_effort(settings.thinking_budget),
+                "summary": "auto",
+            }
         for k, v in settings.extra.items():
             payload[k] = v
         return payload
