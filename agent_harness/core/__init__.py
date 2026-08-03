@@ -109,6 +109,7 @@ from .memory import LongTermMemory, Memory, Session
 from .models import (
     ContentBlock,
     Cost,
+    Effort,
     ImageBlock,
     Message,
     Model,
@@ -189,6 +190,7 @@ __all__ = [
     "Credential",
     "CredentialResolver",
     "DedupFileReads",
+    "Effort",
     "ElicitationRequested",
     "Error",
     "Event",

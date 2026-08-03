@@ -242,6 +242,16 @@ batteries-included implementation the host can construct and pass in.
 # --- Capabilities + settings -------------------------------------------------
 
 
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+"""How hard a model should work on a response, in the vendors' own vocabulary.
+
+Maps onto Anthropic's ``output_config.effort`` and OpenAI's
+``reasoning.effort``. Not every model accepts every level — each provider
+module publishes an ``EFFORT_LEVELS_BY_MODEL`` catalogue saying which levels
+its models take.
+"""
+
+
 class ModelCapabilities(BaseModel):
     """Declarative statement of what a model can do (the loop reads these,
     never the model's name).
@@ -291,6 +301,14 @@ class ModelSettings(BaseModel):
     seed: int | None = None
     parallel_tool_calls: bool | None = None
     thinking_budget: int | None = None
+    effort: Effort | None = None
+    """Requested thinking effort, sent in the provider's own request shape.
+
+    ``None`` says nothing on the wire, preserving prior behaviour. When set it
+    is sent as-is — never bucketed or downgraded — and on OpenAI it takes
+    precedence over the coarse ``thinking_budget``-derived effort. Additive:
+    ``thinking_budget`` semantics are unchanged.
+    """
     # Provider-native ("built-in") tools appended to the wire tools list
     # alongside the function-declaration tools — e.g. web search:
     # OpenAI ``{"type": "web_search"}`` or Google ``{"google_search": {}}``.
