@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_harness.core.errors import NotSupportedError
+from agent_harness.core.errors import ConfigError, NotSupportedError
 from agent_harness.core.events import (
     MessageDelta,
     ModelEnd,
@@ -35,13 +35,20 @@ from agent_harness.core.models import (
 )
 from agent_harness.providers import anthropic as anthropic_mod
 from agent_harness.providers.anthropic import (
+    _CAPABILITIES_BY_MODEL,
     _CAPS_OPUS_4_7,
+    EFFORT_LEVELS_BY_MODEL,
     OPUS_4_7,
+    OPUS_4_8,
+    OPUS_5,
+    SONNET_4_6,
+    SONNET_5,
     AnthropicMessagesModel,
     AnthropicProvider,
     _build_final_message,
     _parse_json_args,
     _usage_from,
+    supported_effort_levels,
 )
 from tests.anthropic_sdk_fakes import (
     _build_fake_client,
@@ -567,3 +574,110 @@ async def test_multiple_thinking_blocks_keep_their_own_text_and_signature() -> N
     assert [d.partial for d in out if isinstance(d, ThinkingDelta)] == ["first", "second"]
     assert len([e for e in out if isinstance(e, ThinkingStart)]) == 2
     assert len([e for e in out if isinstance(e, ThinkingEnd)]) == 2
+
+
+# --- tests: model catalogue + effort ----------------------------------------
+
+_ALL_CLAUDE_MODELS = (OPUS_5, OPUS_4_8, OPUS_4_7, SONNET_5, SONNET_4_6)
+
+
+def _bare_model(name: str) -> AnthropicMessagesModel:
+    return AnthropicMessagesModel(provider=AnthropicProvider(client=MagicMock()), name=name)
+
+
+@pytest.mark.parametrize("name", _ALL_CLAUDE_MODELS)
+def test_capabilities_resolve_from_a_bare_model_name(name: str) -> None:
+    # Regression test: capabilities=None must resolve from the catalogue by
+    # name, never silently hand out Opus 4.7's limits under another name.
+    m = _bare_model(name)
+    assert m.capabilities == _CAPS_OPUS_4_7
+    assert m.capabilities.context_window == 1_000_000
+    assert m.capabilities.max_output_tokens == 128_000
+    assert m.capabilities.adaptive_thinking is True
+
+
+def test_unknown_model_name_with_no_capabilities_raises_config_error() -> None:
+    with pytest.raises(ConfigError, match="claude-nonexistent"):
+        _bare_model("claude-nonexistent")
+
+
+def test_unknown_model_name_with_explicit_capabilities_constructs_fine() -> None:
+    caps = _CAPS_OPUS_4_7.model_copy(update={"context_window": 200_000})
+    m = AnthropicMessagesModel(
+        provider=AnthropicProvider(client=MagicMock()),
+        name="claude-nonexistent",
+        capabilities=caps,
+    )
+    assert m.capabilities is caps
+
+
+def test_catalogue_enumerates_every_supported_model() -> None:
+    assert set(_CAPABILITIES_BY_MODEL) == set(_ALL_CLAUDE_MODELS)
+    # The effort catalogue mirrors the capabilities catalogue key-for-key, so
+    # a consumer can enumerate one table and trust the other.
+    assert set(EFFORT_LEVELS_BY_MODEL) == set(_ALL_CLAUDE_MODELS)
+
+
+def test_opus_4_7_max_output_matches_current_docs() -> None:
+    # Was 64_000 in the code while the docs said 128k — pin the corrected value.
+    assert _CAPS_OPUS_4_7.max_output_tokens == 128_000
+
+
+def test_sonnet_4_6_effort_levels_exclude_xhigh() -> None:
+    # xhigh is newer than max; Sonnet 4.6 has max but not xhigh. Offering
+    # xhigh there would send a level the vendor documents as unsupported.
+    assert supported_effort_levels(SONNET_4_6) == ("low", "medium", "high", "max")
+
+
+@pytest.mark.parametrize("name", [OPUS_5, OPUS_4_8, OPUS_4_7, SONNET_5])
+def test_every_other_claude_model_supports_all_five_levels(name: str) -> None:
+    assert supported_effort_levels(name) == ("low", "medium", "high", "xhigh", "max")
+
+
+def test_supported_effort_levels_raises_for_unknown_model() -> None:
+    with pytest.raises(ConfigError, match="claude-nonexistent"):
+        supported_effort_levels("claude-nonexistent")
+
+
+def test_effort_lands_in_output_config() -> None:
+    m = _bare_model(OPUS_5)
+    payload = m._build_payload(
+        [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
+        [],
+        ModelSettings(effort="xhigh"),
+    )
+    assert payload["output_config"] == {"effort": "xhigh"}
+
+
+def test_effort_is_emitted_independently_of_thinking() -> None:
+    # Anthropic documents effort as not requiring thinking to be enabled, so
+    # it must not hide inside the thinking_budget guard.
+    m = _bare_model(SONNET_4_6)
+    payload = m._build_payload(
+        [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
+        [],
+        ModelSettings(effort="max"),
+    )
+    assert "thinking" not in payload
+    assert payload["output_config"] == {"effort": "max"}
+
+
+def test_effort_and_thinking_budget_coexist() -> None:
+    m = _bare_model(OPUS_4_7)
+    payload = m._build_payload(
+        [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
+        [],
+        ModelSettings(effort="low", thinking_budget=2_000),
+    )
+    assert payload["thinking"] == {"type": "adaptive", "display": "summarized"}
+    assert payload["output_config"] == {"effort": "low"}
+
+
+def test_no_effort_means_no_output_config() -> None:
+    m = _bare_model(OPUS_4_7)
+    payload = m._build_payload(
+        [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
+        [],
+        ModelSettings(),
+    )
+    assert "output_config" not in payload
