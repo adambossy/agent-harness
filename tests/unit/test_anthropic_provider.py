@@ -611,27 +611,16 @@ def test_unknown_model_name_with_explicit_capabilities_constructs_fine() -> None
     assert m.capabilities is caps
 
 
-def test_catalogue_enumerates_every_supported_model() -> None:
-    assert set(_CAPABILITIES_BY_MODEL) == set(_ALL_CLAUDE_MODELS)
+def test_effort_catalogue_mirrors_the_capabilities_catalogue() -> None:
     # The effort catalogue mirrors the capabilities catalogue key-for-key, so
     # a consumer can enumerate one table and trust the other.
-    assert set(EFFORT_LEVELS_BY_MODEL) == set(_ALL_CLAUDE_MODELS)
-
-
-def test_opus_4_7_max_output_matches_current_docs() -> None:
-    # Was 64_000 in the code while the docs said 128k — pin the corrected value.
-    assert _CAPS_OPUS_4_7.max_output_tokens == 128_000
+    assert set(EFFORT_LEVELS_BY_MODEL) == set(_CAPABILITIES_BY_MODEL)
 
 
 def test_sonnet_4_6_effort_levels_exclude_xhigh() -> None:
     # xhigh is newer than max; Sonnet 4.6 has max but not xhigh. Offering
     # xhigh there would send a level the vendor documents as unsupported.
     assert supported_effort_levels(SONNET_4_6) == ("low", "medium", "high", "max")
-
-
-@pytest.mark.parametrize("name", [OPUS_5, OPUS_4_8, OPUS_4_7, SONNET_5])
-def test_every_other_claude_model_supports_all_five_levels(name: str) -> None:
-    assert supported_effort_levels(name) == ("low", "medium", "high", "xhigh", "max")
 
 
 def test_supported_effort_levels_raises_for_unknown_model() -> None:

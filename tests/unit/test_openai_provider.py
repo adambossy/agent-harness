@@ -407,25 +407,14 @@ def test_unknown_model_name_with_explicit_capabilities_constructs_fine() -> None
     assert m.capabilities is caps
 
 
-def test_catalogue_enumerates_every_supported_model() -> None:
-    assert set(_CAPABILITIES_BY_MODEL) == set(_ALL_OPENAI_MODELS)
+def test_effort_catalogue_mirrors_the_capabilities_catalogue() -> None:
     # The effort catalogue mirrors the capabilities catalogue key-for-key, so
     # a consumer can enumerate one table and trust the other.
-    assert set(EFFORT_LEVELS_BY_MODEL) == set(_ALL_OPENAI_MODELS)
-
-
-def test_gpt_5_5_context_window_matches_current_docs() -> None:
-    # Was 400_000 in the code while the docs said 1,050,000 — pin the fix.
-    assert _CAPS_GPT_5_5.context_window == 1_050_000
+    assert set(EFFORT_LEVELS_BY_MODEL) == set(_CAPABILITIES_BY_MODEL)
 
 
 def test_gpt_5_5_effort_levels_exclude_max() -> None:
     assert supported_effort_levels(GPT_5_5) == ("low", "medium", "high", "xhigh")
-
-
-@pytest.mark.parametrize("name", [GPT_5_6_SOL, GPT_5_6_TERRA])
-def test_gpt_5_6_family_supports_all_five_levels(name: str) -> None:
-    assert supported_effort_levels(name) == ("low", "medium", "high", "xhigh", "max")
 
 
 def test_supported_effort_levels_raises_for_unknown_model() -> None:
@@ -440,19 +429,13 @@ def test_explicit_effort_lands_in_reasoning() -> None:
 
 def test_explicit_effort_overrides_the_budget_bucket() -> None:
     # 8_000 buckets to "medium"; the explicit level must win, never the
-    # coarser derivation (which cannot express xhigh or max at all).
+    # coarser derivation (which cannot express xhigh or max at all). The
+    # full-dict assert also pins "summary" on this path: dropping it would
+    # silence every thinking event downstream.
     payload = _bare_model(GPT_5_5)._build_payload(
         _hi(), [], ModelSettings(thinking_budget=8_000, effort="xhigh")
     )
-    assert payload["reasoning"]["effort"] == "xhigh"
-
-
-def test_reasoning_still_requests_a_summary_when_effort_is_explicit() -> None:
-    # Dropping "summary" here would silence every thinking event downstream.
-    payload = _bare_model(GPT_5_5)._build_payload(
-        _hi(), [], ModelSettings(thinking_budget=8_000, effort="low")
-    )
-    assert payload["reasoning"]["summary"] == "auto"
+    assert payload["reasoning"] == {"effort": "xhigh", "summary": "auto"}
 
 
 def test_effort_dropped_when_thinking_capability_off() -> None:

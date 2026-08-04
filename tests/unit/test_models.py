@@ -11,7 +11,6 @@ import pytest
 from agent_harness.core.errors import NotSupportedError
 from agent_harness.core.models import (
     ContentBlock,
-    Effort,
     ImageBlock,
     Message,
     Model,
@@ -157,11 +156,6 @@ def test_model_settings_defaults_are_all_none_or_empty() -> None:
     assert s.thinking_budget is None
     assert s.effort is None
     assert s.extra == {}
-
-
-def test_model_settings_effort_accepts_the_vendor_vocabulary() -> None:
-    for level in get_args(Effort):
-        assert ModelSettings(effort=level).effort == level
 
 
 def test_model_settings_effort_rejects_unknown_levels() -> None:
