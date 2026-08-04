@@ -270,6 +270,9 @@ class OpenRouterModel(AnthropicMessagesModel):
                     "capabilities explicitly for models outside "
                     "_CAPABILITIES_BY_MODEL (GLM_5_2, KIMI_K3)"
                 )
+            # Catalogue values are shared instances; copy so mutating one
+            # model's resolved instance can never rewrite another's.
+            capabilities = capabilities.model_copy()
         super().__init__(provider=provider, name=name, capabilities=capabilities)
         self.routing = routing if routing is not None else US_FP8_ZDR
 

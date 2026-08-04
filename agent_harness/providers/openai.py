@@ -271,6 +271,10 @@ class OpenAIResponsesModel:
                     "capabilities explicitly for models outside "
                     "_CAPABILITIES_BY_MODEL"
                 )
+            # The catalogue shares one ModelCapabilities across ids; copy so
+            # mutating one model's resolved instance can never silently
+            # rewrite every other model's.
+            capabilities = capabilities.model_copy()
         self.name = name
         self.provider = provider
         self.capabilities = capabilities
