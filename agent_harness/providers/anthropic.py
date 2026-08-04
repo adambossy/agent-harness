@@ -74,6 +74,11 @@ SONNET_4_6 = "claude-sonnet-4-6"
 # All five current Claude models publish identical limits (1M context, 128k
 # output, adaptive thinking); they differ only in accepted effort levels
 # (EFFORT_LEVELS_BY_MODEL), so one capabilities value serves the catalogue.
+#
+# max_output_tokens is wire-behavioral, not just descriptive: it is the
+# default max_tokens on every request (see _build_payload), and Anthropic
+# 400s a max_tokens above the model's real cap — a wrong value here breaks
+# every bare-constructed request to that model, it doesn't just misreport.
 _CAPS_CLAUDE = ModelCapabilities(
     parallel_tool_calls=True,
     thinking=True,
@@ -419,6 +424,12 @@ class AnthropicMessagesModel:
             # Deliberately outside the thinking guard: Anthropic documents
             # effort as independent of thinking — it shapes every output
             # token (including tool calls), not just reasoning depth.
+            #
+            # Precedence: the extra-merge below replaces whole top-level keys,
+            # so a caller still setting extra={"output_config": ...} (the only
+            # way to reach effort before ModelSettings.effort existed) wins
+            # wholesale and this value is dropped — same rule as every extra
+            # key.
             payload["output_config"] = {"effort": settings.effort}
         # Provider-specific carry-through.
         # OpenRouterModel._build_payload (subclass) depends on this merge
