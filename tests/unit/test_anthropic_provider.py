@@ -36,7 +36,7 @@ from agent_harness.core.models import (
 from agent_harness.providers import anthropic as anthropic_mod
 from agent_harness.providers.anthropic import (
     _CAPABILITIES_BY_MODEL,
-    _CAPS_OPUS_4_7,
+    _CAPS_CLAUDE,
     EFFORT_LEVELS_BY_MODEL,
     OPUS_4_7,
     OPUS_4_8,
@@ -163,7 +163,7 @@ def test_build_payload_respects_settings_and_capabilities() -> None:
 
 def test_build_payload_uses_the_budget_shape_for_pre_4_7_models() -> None:
     """Older Claude models still take budget_tokens; only 4.7+ rejects it."""
-    caps = _CAPS_OPUS_4_7.model_copy(update={"adaptive_thinking": False})
+    caps = _CAPS_CLAUDE.model_copy(update={"adaptive_thinking": False})
     m = AnthropicMessagesModel(provider=AnthropicProvider(client=MagicMock()), capabilities=caps)
     payload = m._build_payload(
         [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())],
@@ -590,7 +590,7 @@ def test_capabilities_resolve_from_a_bare_model_name(name: str) -> None:
     # Regression test: capabilities=None must resolve from the catalogue by
     # name, never silently hand out Opus 4.7's limits under another name.
     m = _bare_model(name)
-    assert m.capabilities == _CAPS_OPUS_4_7
+    assert m.capabilities == _CAPS_CLAUDE
     assert m.capabilities.context_window == 1_000_000
     assert m.capabilities.max_output_tokens == 128_000
     assert m.capabilities.adaptive_thinking is True
@@ -602,7 +602,7 @@ def test_unknown_model_name_with_no_capabilities_raises_config_error() -> None:
 
 
 def test_unknown_model_name_with_explicit_capabilities_constructs_fine() -> None:
-    caps = _CAPS_OPUS_4_7.model_copy(update={"context_window": 200_000})
+    caps = _CAPS_CLAUDE.model_copy(update={"context_window": 200_000})
     m = AnthropicMessagesModel(
         provider=AnthropicProvider(client=MagicMock()),
         name="claude-nonexistent",

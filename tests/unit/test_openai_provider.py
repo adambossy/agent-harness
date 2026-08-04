@@ -39,7 +39,7 @@ from agent_harness.core.models import (
 from agent_harness.providers import openai as openai_mod
 from agent_harness.providers.openai import (
     _CAPABILITIES_BY_MODEL,
-    _CAPS_GPT_5_5,
+    _CAPS_GPT,
     EFFORT_LEVELS_BY_MODEL,
     GPT_5_5,
     GPT_5_6_SOL,
@@ -387,7 +387,7 @@ def test_capabilities_resolve_from_a_bare_model_name(name: str) -> None:
     # Regression test: capabilities=None must resolve from the catalogue by
     # name, never silently hand out GPT-5.5's limits under another name.
     m = _bare_model(name)
-    assert m.capabilities == _CAPS_GPT_5_5
+    assert m.capabilities == _CAPS_GPT
     assert m.capabilities.context_window == 1_050_000
     assert m.capabilities.max_output_tokens == 128_000
 
@@ -398,7 +398,7 @@ def test_unknown_model_name_with_no_capabilities_raises_config_error() -> None:
 
 
 def test_unknown_model_name_with_explicit_capabilities_constructs_fine() -> None:
-    caps = _CAPS_GPT_5_5.model_copy(update={"context_window": 200_000})
+    caps = _CAPS_GPT.model_copy(update={"context_window": 200_000})
     m = OpenAIResponsesModel(
         provider=OpenAIProvider(client=MagicMock()),
         name="gpt-nonexistent",

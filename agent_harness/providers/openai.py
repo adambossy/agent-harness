@@ -66,7 +66,10 @@ GPT_5_6_SOL = "gpt-5.6-sol"
 GPT_5_6_TERRA = "gpt-5.6-terra"
 """OpenAI GPT-5.6 Terra, the cost-balanced tier of the 5.6 family."""
 
-_CAPS_GPT_5_5 = ModelCapabilities(
+# All three current GPT models publish identical limits (1,050,000 context,
+# 128k output); they differ only in accepted effort levels
+# (EFFORT_LEVELS_BY_MODEL), so one capabilities value serves the catalogue.
+_CAPS_GPT = ModelCapabilities(
     parallel_tool_calls=True,
     thinking=True,
     cache_control=True,
@@ -79,14 +82,9 @@ _CAPS_GPT_5_5 = ModelCapabilities(
     supports_compaction=False,
 )
 
-_CAPABILITIES_BY_MODEL: dict[str, ModelCapabilities] = {
-    # All three current models publish identical limits (1,050,000 context,
-    # 128k output), so they share one capabilities value; they differ only in
-    # accepted effort levels (EFFORT_LEVELS_BY_MODEL).
-    GPT_5_6_SOL: _CAPS_GPT_5_5,
-    GPT_5_6_TERRA: _CAPS_GPT_5_5,
-    GPT_5_5: _CAPS_GPT_5_5,
-}
+_CAPABILITIES_BY_MODEL: dict[str, ModelCapabilities] = dict.fromkeys(
+    (GPT_5_6_SOL, GPT_5_6_TERRA, GPT_5_5), _CAPS_GPT
+)
 """Known OpenAI model ids → their documented capabilities.
 
 Looked up in :meth:`OpenAIResponsesModel.__init__` when the caller omits

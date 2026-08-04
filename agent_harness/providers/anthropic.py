@@ -71,7 +71,10 @@ SONNET_5 = "claude-sonnet-5"
 SONNET_4_6 = "claude-sonnet-4-6"
 """Anthropic Claude Sonnet 4.6."""
 
-_CAPS_OPUS_4_7 = ModelCapabilities(
+# All five current Claude models publish identical limits (1M context, 128k
+# output, adaptive thinking); they differ only in accepted effort levels
+# (EFFORT_LEVELS_BY_MODEL), so one capabilities value serves the catalogue.
+_CAPS_CLAUDE = ModelCapabilities(
     parallel_tool_calls=True,
     thinking=True,
     cache_control=True,
@@ -87,16 +90,9 @@ _CAPS_OPUS_4_7 = ModelCapabilities(
     adaptive_thinking=True,
 )
 
-_CAPABILITIES_BY_MODEL: dict[str, ModelCapabilities] = {
-    # All five current Claude models publish identical limits (1M context,
-    # 128k output, adaptive thinking), so they share one capabilities value;
-    # they differ only in accepted effort levels (EFFORT_LEVELS_BY_MODEL).
-    OPUS_5: _CAPS_OPUS_4_7,
-    OPUS_4_8: _CAPS_OPUS_4_7,
-    OPUS_4_7: _CAPS_OPUS_4_7,
-    SONNET_5: _CAPS_OPUS_4_7,
-    SONNET_4_6: _CAPS_OPUS_4_7,
-}
+_CAPABILITIES_BY_MODEL: dict[str, ModelCapabilities] = dict.fromkeys(
+    (OPUS_5, OPUS_4_8, OPUS_4_7, SONNET_5, SONNET_4_6), _CAPS_CLAUDE
+)
 """Known Anthropic model ids → their documented capabilities.
 
 Looked up in :meth:`AnthropicMessagesModel.__init__` when the caller omits
