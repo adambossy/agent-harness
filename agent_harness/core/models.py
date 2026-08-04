@@ -276,11 +276,13 @@ class ModelCapabilities(BaseModel):
     adaptive_thinking: bool = False
     """Model wants Anthropic's adaptive thinking shape rather than a token budget.
 
-    Claude 4.7 and later (Opus 5, Opus 4.8/4.7, Sonnet 5, Fable 5) removed
-    ``thinking: {"type": "enabled", "budget_tokens": N}`` — sending it returns
-    HTTP 400 telling you to use ``{"type": "adaptive"}`` with
-    ``output_config.effort``. Older Claude models, and the OpenRouter-served
-    open models, still take the budget shape, so this stays False by default.
+    Claude 4.6 and later support ``thinking: {"type": "adaptive"}`` with
+    ``output_config.effort``. From 4.7 on the budget shape
+    (``{"type": "enabled", "budget_tokens": N}``) is removed outright —
+    sending it returns HTTP 400 naming the replacement — while the 4.6
+    models still accept it as deprecated. Earlier Claude models, and the
+    OpenRouter-served open models, take only the budget shape, so this
+    stays False by default.
     """
 
 
