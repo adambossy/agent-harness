@@ -307,7 +307,11 @@ class ModelSettings(BaseModel):
     ``None`` says nothing on the wire, preserving prior behaviour. When set it
     is sent as-is — never bucketed or downgraded — and on OpenAI it takes
     precedence over the coarse ``thinking_budget``-derived effort. Additive:
-    ``thinking_budget`` semantics are unchanged.
+    ``thinking_budget`` semantics are unchanged. Emission is provider-shaped:
+    Anthropic sends it whether or not thinking is on (the vendor documents
+    effort as independent of thinking), while OpenAI emits it only for models
+    with the ``thinking`` capability, per this class's drop-when-unsupported
+    rule.
     """
     # Provider-native ("built-in") tools appended to the wire tools list
     # alongside the function-declaration tools — e.g. web search:

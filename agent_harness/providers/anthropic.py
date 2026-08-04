@@ -401,7 +401,7 @@ class AnthropicMessagesModel:
                 # Claude 4.7+ rejects budget_tokens with a 400 naming the
                 # replacement. The budget is only an opt-in signal here; depth
                 # is controlled by output_config.effort, which a caller sets
-                # through ModelSettings.extra. "summarized" is deliberate: the
+                # through ModelSettings.effort. "summarized" is deliberate: the
                 # API default is "omitted", which streams thinking blocks whose
                 # text is empty — invisible reasoning defeats the point of
                 # asking for it. Billing is identical either way.
