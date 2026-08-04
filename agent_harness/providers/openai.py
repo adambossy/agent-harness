@@ -366,20 +366,18 @@ class OpenAIResponsesModel:
             payload["tools"] = wire_tools
         if settings.parallel_tool_calls is not None and self.capabilities.parallel_tool_calls:
             payload["parallel_tool_calls"] = settings.parallel_tool_calls
-        if self.capabilities.thinking:
-            # An explicit effort wins over the budget-derived bucket — the
-            # bucketing can express neither xhigh nor max, so deferring to it
-            # would silently downgrade what the caller asked for.
-            effort: str | None = settings.effort
-            if effort is None and settings.thinking_budget is not None:
-                # Map budget → reasoning effort buckets (low/medium/high).
-                effort = _budget_to_effort(settings.thinking_budget)
-            if effort is not None:
-                # "summary" is required to get any reasoning text back: without
-                # it the Responses API emits no reasoning_summary_text deltas
-                # at all, so the handler below is dead code and thinking events
-                # never fire.
-                payload["reasoning"] = {"effort": effort, "summary": "auto"}
+        # An explicit effort wins over the budget-derived bucket — the
+        # bucketing (low/medium/high) can express neither xhigh nor max, so
+        # deferring to it would silently downgrade what the caller asked for.
+        effort: str | None = settings.effort
+        if effort is None and settings.thinking_budget is not None:
+            effort = _budget_to_effort(settings.thinking_budget)
+        if self.capabilities.thinking and effort is not None:
+            # "summary" is required to get any reasoning text back: without
+            # it the Responses API emits no reasoning_summary_text deltas
+            # at all, so the handler below is dead code and thinking events
+            # never fire.
+            payload["reasoning"] = {"effort": effort, "summary": "auto"}
         for k, v in settings.extra.items():
             payload[k] = v
         return payload
