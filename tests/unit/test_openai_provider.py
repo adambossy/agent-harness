@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from agent_harness.core.errors import ModelError, NotSupportedError
+from agent_harness.core.errors import ConfigError, ModelError, NotSupportedError
 from agent_harness.core.events import (
     MessageDelta,
     MessageEnd,
@@ -38,11 +38,17 @@ from agent_harness.core.models import (
 )
 from agent_harness.providers import openai as openai_mod
 from agent_harness.providers.openai import (
+    _CAPABILITIES_BY_MODEL,
+    _CAPS_GPT,
+    EFFORT_LEVELS_BY_MODEL,
     GPT_5_5,
+    GPT_5_6_SOL,
+    GPT_5_6_TERRA,
     OpenAIProvider,
     OpenAIResponsesModel,
     _budget_to_effort,
     _parse_json_args,
+    supported_effort_levels,
 )
 
 
@@ -361,3 +367,84 @@ def test_reasoning_payload_requests_a_summary() -> None:
     )
     assert payload["reasoning"]["summary"] == "auto"
     assert payload["reasoning"]["effort"] == "medium"
+
+
+# --- model catalogue + effort ------------------------------------------------
+
+_ALL_OPENAI_MODELS = (GPT_5_6_SOL, GPT_5_6_TERRA, GPT_5_5)
+
+
+def _bare_model(name: str) -> OpenAIResponsesModel:
+    return OpenAIResponsesModel(provider=OpenAIProvider(client=MagicMock()), name=name)
+
+
+def _hi() -> list[Message]:
+    return [Message(role="user", content=[TextBlock(text="hi")], timestamp=_ts())]
+
+
+@pytest.mark.parametrize("name", _ALL_OPENAI_MODELS)
+def test_capabilities_resolve_from_a_bare_model_name(name: str) -> None:
+    # Regression test: capabilities=None must resolve from the catalogue by
+    # name, never silently hand out GPT-5.5's limits under another name.
+    m = _bare_model(name)
+    assert m.capabilities == _CAPS_GPT
+    assert m.capabilities.context_window == 1_050_000
+    assert m.capabilities.max_output_tokens == 128_000
+
+
+def test_unknown_model_name_with_no_capabilities_raises_config_error() -> None:
+    with pytest.raises(ConfigError, match="gpt-nonexistent"):
+        _bare_model("gpt-nonexistent")
+
+
+def test_unknown_model_name_with_explicit_capabilities_constructs_fine() -> None:
+    caps = _CAPS_GPT.model_copy(update={"context_window": 200_000})
+    m = OpenAIResponsesModel(
+        provider=OpenAIProvider(client=MagicMock()),
+        name="gpt-nonexistent",
+        capabilities=caps,
+    )
+    assert m.capabilities is caps
+
+
+def test_effort_catalogue_mirrors_the_capabilities_catalogue() -> None:
+    # The effort catalogue mirrors the capabilities catalogue key-for-key, so
+    # a consumer can enumerate one table and trust the other.
+    assert set(EFFORT_LEVELS_BY_MODEL) == set(_CAPABILITIES_BY_MODEL)
+
+
+def test_gpt_5_5_effort_levels_exclude_max() -> None:
+    assert supported_effort_levels(GPT_5_5) == ("low", "medium", "high", "xhigh")
+
+
+def test_supported_effort_levels_raises_for_unknown_model() -> None:
+    with pytest.raises(ConfigError, match="gpt-nonexistent"):
+        supported_effort_levels("gpt-nonexistent")
+
+
+def test_explicit_effort_lands_in_reasoning() -> None:
+    payload = _bare_model(GPT_5_6_SOL)._build_payload(_hi(), [], ModelSettings(effort="xhigh"))
+    assert payload["reasoning"] == {"effort": "xhigh", "summary": "auto"}
+
+
+def test_explicit_effort_overrides_the_budget_bucket() -> None:
+    # 8_000 buckets to "medium"; the explicit level must win, never the
+    # coarser derivation (which cannot express xhigh or max at all). The
+    # full-dict assert also pins "summary" on this path: dropping it would
+    # silence every thinking event downstream.
+    payload = _bare_model(GPT_5_5)._build_payload(
+        _hi(), [], ModelSettings(thinking_budget=8_000, effort="xhigh")
+    )
+    assert payload["reasoning"] == {"effort": "xhigh", "summary": "auto"}
+
+
+def test_effort_dropped_when_thinking_capability_off() -> None:
+    m = _bare_model(GPT_5_5)
+    m.capabilities = m.capabilities.model_copy(update={"thinking": False})
+    payload = m._build_payload(_hi(), [], ModelSettings(effort="high"))
+    assert "reasoning" not in payload
+
+
+def test_no_effort_and_no_budget_means_no_reasoning() -> None:
+    payload = _bare_model(GPT_5_5)._build_payload(_hi(), [], ModelSettings())
+    assert "reasoning" not in payload

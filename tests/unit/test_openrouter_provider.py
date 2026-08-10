@@ -24,8 +24,10 @@ from agent_harness.core.models import (
     ThinkingBlock,
 )
 from agent_harness.providers.openrouter import (
+    _CAPABILITIES_BY_MODEL,
     CAPS_GLM_5_2,
     CAPS_KIMI_K3,
+    EFFORT_LEVELS_BY_MODEL,
     GLM_5_2,
     KIMI_K3,
     MOONSHOT_DIRECT,
@@ -34,6 +36,7 @@ from agent_harness.providers.openrouter import (
     OpenRouterModel,
     OpenRouterProvider,
     RoutingPolicy,
+    supported_effort_levels,
 )
 from tests.anthropic_sdk_fakes import (
     _build_fake_client,
@@ -238,8 +241,9 @@ def test_model_satisfies_protocol() -> None:
 
 
 def test_default_construction_resolves_glm_5_2_capabilities() -> None:
-    # Regression test: capabilities=None must resolve from _CAPS_BY_MODEL by
-    # name, never fall through to the parent's Anthropic-Opus default.
+    # Regression test: capabilities=None must resolve from
+    # _CAPABILITIES_BY_MODEL by name, never fall through to the parent's
+    # Anthropic-Opus default.
     m = _model()
     assert m.capabilities == CAPS_GLM_5_2
     assert m.capabilities.cache_control is False
@@ -361,3 +365,34 @@ def test_build_payload_rejects_a_non_dict_extra_body() -> None:
     settings = ModelSettings(extra={"extra_body": "junk"})
     with pytest.raises(ConfigError, match="extra_body"):
         m._build_payload(_msgs(), [], settings)
+
+
+# --- tests: effort catalogue -------------------------------------------------
+
+
+def test_effort_catalogue_mirrors_the_capabilities_catalogue() -> None:
+    # One enumerable catalogue: a consumer listing models from either table
+    # must see the same ids.
+    assert set(EFFORT_LEVELS_BY_MODEL) == set(_CAPABILITIES_BY_MODEL) == {GLM_5_2, KIMI_K3}
+
+
+@pytest.mark.parametrize("name", [GLM_5_2, KIMI_K3])
+def test_openrouter_models_accept_the_full_effort_vocabulary(name: str) -> None:
+    # OpenRouter's Anthropic-compatible endpoint documents all five levels;
+    # whether an upstream honours a level fails soft, not invalid.
+    assert supported_effort_levels(name) == ("low", "medium", "high", "xhigh", "max")
+
+
+def test_supported_effort_levels_raises_for_unknown_model() -> None:
+    with pytest.raises(ConfigError, match="some/other-model"):
+        supported_effort_levels("some/other-model")
+
+
+def test_effort_flows_through_to_output_config() -> None:
+    # Inherited from the Anthropic adapter: OpenRouter documents
+    # output_config.effort with the same vocabulary, so the parent's emission
+    # is already the right wire shape here.
+    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    payload = m._build_payload(_msgs(), [], ModelSettings(effort="xhigh"))
+    assert payload["output_config"] == {"effort": "xhigh"}
+    assert payload["extra_body"]["provider"] == US_FP8_ZDR.to_wire()

@@ -242,6 +242,16 @@ batteries-included implementation the host can construct and pass in.
 # --- Capabilities + settings -------------------------------------------------
 
 
+Effort = Literal["low", "medium", "high", "xhigh", "max"]
+"""How hard a model should work on a response, in the vendors' own vocabulary.
+
+Maps onto Anthropic's ``output_config.effort`` and OpenAI's
+``reasoning.effort``. Not every model accepts every level — each provider
+module publishes an ``EFFORT_LEVELS_BY_MODEL`` catalogue saying which levels
+its models take.
+"""
+
+
 class ModelCapabilities(BaseModel):
     """Declarative statement of what a model can do (the loop reads these,
     never the model's name).
@@ -266,11 +276,13 @@ class ModelCapabilities(BaseModel):
     adaptive_thinking: bool = False
     """Model wants Anthropic's adaptive thinking shape rather than a token budget.
 
-    Claude 4.7 and later (Opus 5, Opus 4.8/4.7, Sonnet 5, Fable 5) removed
-    ``thinking: {"type": "enabled", "budget_tokens": N}`` — sending it returns
-    HTTP 400 telling you to use ``{"type": "adaptive"}`` with
-    ``output_config.effort``. Older Claude models, and the OpenRouter-served
-    open models, still take the budget shape, so this stays False by default.
+    Claude 4.6 and later support ``thinking: {"type": "adaptive"}`` with
+    ``output_config.effort``. From 4.7 on the budget shape
+    (``{"type": "enabled", "budget_tokens": N}``) is removed outright —
+    sending it returns HTTP 400 naming the replacement — while the 4.6
+    models still accept it as deprecated. Earlier Claude models, and the
+    OpenRouter-served open models, take only the budget shape, so this
+    stays False by default.
     """
 
 
@@ -291,6 +303,18 @@ class ModelSettings(BaseModel):
     seed: int | None = None
     parallel_tool_calls: bool | None = None
     thinking_budget: int | None = None
+    effort: Effort | None = None
+    """Requested thinking effort, sent in the provider's own request shape.
+
+    ``None`` says nothing on the wire, preserving prior behaviour. When set it
+    is sent as-is — never bucketed or downgraded — and on OpenAI it takes
+    precedence over the coarse ``thinking_budget``-derived effort. Additive:
+    ``thinking_budget`` semantics are unchanged. Emission is provider-shaped:
+    Anthropic sends it whether or not thinking is on (the vendor documents
+    effort as independent of thinking), while OpenAI emits it only for models
+    with the ``thinking`` capability, per this class's drop-when-unsupported
+    rule.
+    """
     # Provider-native ("built-in") tools appended to the wire tools list
     # alongside the function-declaration tools — e.g. web search:
     # OpenAI ``{"type": "web_search"}`` or Google ``{"google_search": {}}``.

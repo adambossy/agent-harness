@@ -16,6 +16,7 @@ from typing import Any, Literal
 from agent_harness.core.credentials import Credential, CredentialResolver
 from agent_harness.core.errors import ConfigError
 from agent_harness.core.models import (
+    Effort,
     Message,
     ModelCapabilities,
     ModelSettings,
@@ -26,6 +27,7 @@ from .anthropic import AnthropicMessagesModel, AnthropicProvider
 __all__ = [
     "CAPS_GLM_5_2",
     "CAPS_KIMI_K3",
+    "EFFORT_LEVELS_BY_MODEL",
     "GLM_5_2",
     "KIMI_K3",
     "MOONSHOT_DIRECT",
@@ -34,6 +36,7 @@ __all__ = [
     "OpenRouterModel",
     "OpenRouterProvider",
     "RoutingPolicy",
+    "supported_effort_levels",
 ]
 
 
@@ -187,7 +190,10 @@ CAPS_KIMI_K3 = ModelCapabilities(
 )
 """Kimi K3 limits. Multimodal input; reasoning is always on upstream."""
 
-_CAPS_BY_MODEL: dict[str, ModelCapabilities] = {GLM_5_2: CAPS_GLM_5_2, KIMI_K3: CAPS_KIMI_K3}
+_CAPABILITIES_BY_MODEL: dict[str, ModelCapabilities] = {
+    GLM_5_2: CAPS_GLM_5_2,
+    KIMI_K3: CAPS_KIMI_K3,
+}
 """Known OpenRouter model ids → their verified capabilities.
 
 Looked up in :meth:`OpenRouterModel.__init__` when the caller omits
@@ -196,6 +202,39 @@ parent's Anthropic-Opus default — that fallback is exactly what once made an
 unconfigured ``OpenRouterModel`` silently claim Opus context/output limits
 and ``cache_control=True`` under a GLM name.
 """
+
+EFFORT_LEVELS_BY_MODEL: dict[str, tuple[Effort, ...]] = {
+    # OpenRouter's Anthropic-compatible endpoint documents the full
+    # output_config.effort vocabulary for every model it serves; whether a
+    # given upstream honours the level is up to that upstream, and an
+    # unhonoured level fails soft (the request stays valid).
+    GLM_5_2: ("low", "medium", "high", "xhigh", "max"),
+    KIMI_K3: ("low", "medium", "high", "xhigh", "max"),
+}
+"""Effort levels each known model accepts, per OpenRouter's endpoint schema.
+
+Keys mirror :data:`_CAPABILITIES_BY_MODEL` — the enumerable catalogue a
+consumer lists models from instead of hand-maintaining a parallel table.
+"""
+
+
+def supported_effort_levels(model: str) -> tuple[Effort, ...]:
+    """Effort levels ``model`` accepts, resolved from the catalogue.
+
+    Raises :class:`ConfigError` naming the model when it is unknown, so a
+    consumer can never offer a level the endpoint would reject.
+
+    Example:
+        >>> "xhigh" in supported_effort_levels(KIMI_K3)
+        True
+    """
+    levels = EFFORT_LEVELS_BY_MODEL.get(model)
+    if levels is None:
+        raise ConfigError(
+            f"no known effort levels for OpenRouter model {model!r}; "
+            "see EFFORT_LEVELS_BY_MODEL for the supported ids"
+        )
+    return levels
 
 
 class OpenRouterModel(AnthropicMessagesModel):
@@ -224,13 +263,16 @@ class OpenRouterModel(AnthropicMessagesModel):
         routing: RoutingPolicy | None = None,
     ) -> None:
         if capabilities is None:
-            capabilities = _CAPS_BY_MODEL.get(name)
+            capabilities = _CAPABILITIES_BY_MODEL.get(name)
             if capabilities is None:
                 raise ConfigError(
                     f"no known capabilities for OpenRouter model {name!r}; pass "
-                    "capabilities explicitly for models outside _CAPS_BY_MODEL "
-                    "(GLM_5_2, KIMI_K3)"
+                    "capabilities explicitly for models outside "
+                    "_CAPABILITIES_BY_MODEL (GLM_5_2, KIMI_K3)"
                 )
+            # Catalogue values are shared instances; copy so mutating one
+            # model's resolved instance can never rewrite another's.
+            capabilities = capabilities.model_copy()
         super().__init__(provider=provider, name=name, capabilities=capabilities)
         self.routing = routing if routing is not None else US_FP8_ZDR
 

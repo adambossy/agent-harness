@@ -29,7 +29,7 @@ from agent_harness.core.credentials import (
     api_key_from_credential,
     resolve_credential,
 )
-from agent_harness.core.errors import ModelError, NotSupportedError
+from agent_harness.core.errors import ConfigError, ModelError, NotSupportedError
 from agent_harness.core.events import (
     MessageDelta,
     MessageEnd,
@@ -44,6 +44,7 @@ from agent_harness.core.events import (
     ToolCallStart,
 )
 from agent_harness.core.models import (
+    Effort,
     Message,
     ModelCapabilities,
     ModelSettings,
@@ -55,10 +56,30 @@ from agent_harness.core.models import (
     Usage,
 )
 
+OPUS_5 = "claude-opus-5"
+"""Anthropic Claude Opus 5."""
+
+OPUS_4_8 = "claude-opus-4-8"
+"""Anthropic Claude Opus 4.8."""
+
 OPUS_4_7 = "claude-opus-4-7"
 """Default Anthropic model identifier used by Wave-2."""
 
-_CAPS_OPUS_4_7 = ModelCapabilities(
+SONNET_5 = "claude-sonnet-5"
+"""Anthropic Claude Sonnet 5."""
+
+SONNET_4_6 = "claude-sonnet-4-6"
+"""Anthropic Claude Sonnet 4.6."""
+
+# All five current Claude models publish identical limits (1M context, 128k
+# output, adaptive thinking); they differ only in accepted effort levels
+# (EFFORT_LEVELS_BY_MODEL), so one capabilities value serves the catalogue.
+#
+# max_output_tokens is wire-behavioral, not just descriptive: it is the
+# default max_tokens on every request (see _build_payload), and Anthropic
+# 400s a max_tokens above the model's real cap — a wrong value here breaks
+# every bare-constructed request to that model, it doesn't just misreport.
+_CAPS_CLAUDE = ModelCapabilities(
     parallel_tool_calls=True,
     thinking=True,
     cache_control=True,
@@ -67,12 +88,56 @@ _CAPS_OPUS_4_7 = ModelCapabilities(
     audio_output=False,
     structured_output=True,
     context_window=1_000_000,
-    max_output_tokens=64_000,
+    max_output_tokens=128_000,
     supports_compaction=False,
     # claude-opus-4-7 is one of the models that rejects budget_tokens with a
     # 400; without this the module's own default model cannot think at all.
     adaptive_thinking=True,
 )
+
+_CAPABILITIES_BY_MODEL: dict[str, ModelCapabilities] = dict.fromkeys(
+    (OPUS_5, OPUS_4_8, OPUS_4_7, SONNET_5, SONNET_4_6), _CAPS_CLAUDE
+)
+"""Known Anthropic model ids → their documented capabilities.
+
+Looked up in :meth:`AnthropicMessagesModel.__init__` when the caller omits
+``capabilities`` explicitly. Deliberately does *not* fall through to a
+default — that fallback is what once made any non-Opus-4.7 name silently
+claim Opus 4.7's limits.
+"""
+
+EFFORT_LEVELS_BY_MODEL: dict[str, tuple[Effort, ...]] = {
+    OPUS_5: ("low", "medium", "high", "xhigh", "max"),
+    OPUS_4_8: ("low", "medium", "high", "xhigh", "max"),
+    OPUS_4_7: ("low", "medium", "high", "xhigh", "max"),
+    SONNET_5: ("low", "medium", "high", "xhigh", "max"),
+    # xhigh is a newer level than max; Sonnet 4.6 supports max but not xhigh.
+    SONNET_4_6: ("low", "medium", "high", "max"),
+}
+"""Effort levels each known model accepts, per current Anthropic docs.
+
+Keys mirror :data:`_CAPABILITIES_BY_MODEL` — the enumerable catalogue a
+consumer lists models from instead of hand-maintaining a parallel table.
+"""
+
+
+def supported_effort_levels(model: str) -> tuple[Effort, ...]:
+    """Effort levels ``model`` accepts, resolved from the catalogue.
+
+    Raises :class:`ConfigError` naming the model when it is unknown, so a
+    consumer can never offer a level the vendor documents as unsupported.
+
+    Example:
+        >>> "xhigh" in supported_effort_levels(SONNET_4_6)
+        False
+    """
+    levels = EFFORT_LEVELS_BY_MODEL.get(model)
+    if levels is None:
+        raise ConfigError(
+            f"no known effort levels for Anthropic model {model!r}; "
+            "see EFFORT_LEVELS_BY_MODEL for the supported ids"
+        )
+    return levels
 
 
 def _now() -> datetime:
@@ -217,9 +282,21 @@ class AnthropicMessagesModel:
         name: str = OPUS_4_7,
         capabilities: ModelCapabilities | None = None,
     ) -> None:
+        if capabilities is None:
+            capabilities = _CAPABILITIES_BY_MODEL.get(name)
+            if capabilities is None:
+                raise ConfigError(
+                    f"no known capabilities for Anthropic model {name!r}; pass "
+                    "capabilities explicitly for models outside "
+                    "_CAPABILITIES_BY_MODEL"
+                )
+            # The catalogue shares one ModelCapabilities across ids; copy so
+            # mutating one model's resolved instance can never silently
+            # rewrite every other model's.
+            capabilities = capabilities.model_copy()
         self.name = name
         self.provider = provider
-        self.capabilities = capabilities if capabilities is not None else _CAPS_OPUS_4_7
+        self.capabilities = capabilities
 
     # ----- message translation ---------------------------------------------
 
@@ -333,7 +410,7 @@ class AnthropicMessagesModel:
                 # Claude 4.7+ rejects budget_tokens with a 400 naming the
                 # replacement. The budget is only an opt-in signal here; depth
                 # is controlled by output_config.effort, which a caller sets
-                # through ModelSettings.extra. "summarized" is deliberate: the
+                # through ModelSettings.effort. "summarized" is deliberate: the
                 # API default is "omitted", which streams thinking blocks whose
                 # text is empty — invisible reasoning defeats the point of
                 # asking for it. Billing is identical either way.
@@ -343,6 +420,17 @@ class AnthropicMessagesModel:
                     "type": "enabled",
                     "budget_tokens": settings.thinking_budget,
                 }
+        if settings.effort is not None:
+            # Deliberately outside the thinking guard: Anthropic documents
+            # effort as independent of thinking — it shapes every output
+            # token (including tool calls), not just reasoning depth.
+            #
+            # Precedence: the extra-merge below replaces whole top-level keys,
+            # so a caller still setting extra={"output_config": ...} (the only
+            # way to reach effort before ModelSettings.effort existed) wins
+            # wholesale and this value is dropped — same rule as every extra
+            # key.
+            payload["output_config"] = {"effort": settings.effort}
         # Provider-specific carry-through.
         # OpenRouterModel._build_payload (subclass) depends on this merge
         # happening here, before it reads payload back from super().

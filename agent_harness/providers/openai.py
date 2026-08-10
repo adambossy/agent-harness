@@ -30,7 +30,7 @@ from agent_harness.core.credentials import (
     api_key_from_credential,
     resolve_credential,
 )
-from agent_harness.core.errors import ModelError, NotSupportedError
+from agent_harness.core.errors import ConfigError, ModelError, NotSupportedError
 from agent_harness.core.events import (
     MessageDelta,
     MessageEnd,
@@ -45,6 +45,7 @@ from agent_harness.core.events import (
     ToolCallStart,
 )
 from agent_harness.core.models import (
+    Effort,
     Message,
     ModelCapabilities,
     ModelSettings,
@@ -59,7 +60,16 @@ from agent_harness.core.models import (
 GPT_5_5 = "gpt-5.5"
 """Default OpenAI model identifier used by Wave-2."""
 
-_CAPS_GPT_5_5 = ModelCapabilities(
+GPT_5_6_SOL = "gpt-5.6-sol"
+"""OpenAI GPT-5.6 Sol (the tier the bare ``gpt-5.6`` alias routes to)."""
+
+GPT_5_6_TERRA = "gpt-5.6-terra"
+"""OpenAI GPT-5.6 Terra, the cost-balanced tier of the 5.6 family."""
+
+# All three current GPT models publish identical limits (1,050,000 context,
+# 128k output); they differ only in accepted effort levels
+# (EFFORT_LEVELS_BY_MODEL), so one capabilities value serves the catalogue.
+_CAPS_GPT = ModelCapabilities(
     parallel_tool_calls=True,
     thinking=True,
     cache_control=True,
@@ -67,10 +77,55 @@ _CAPS_GPT_5_5 = ModelCapabilities(
     audio_input=False,
     audio_output=False,
     structured_output=True,
-    context_window=400_000,
+    context_window=1_050_000,
     max_output_tokens=128_000,
     supports_compaction=False,
 )
+
+_CAPABILITIES_BY_MODEL: dict[str, ModelCapabilities] = dict.fromkeys(
+    (GPT_5_6_SOL, GPT_5_6_TERRA, GPT_5_5), _CAPS_GPT
+)
+"""Known OpenAI model ids → their documented capabilities.
+
+Looked up in :meth:`OpenAIResponsesModel.__init__` when the caller omits
+``capabilities`` explicitly. Deliberately does *not* fall through to a
+default — that fallback is what once made any non-GPT-5.5 name silently
+claim GPT-5.5's limits.
+"""
+
+EFFORT_LEVELS_BY_MODEL: dict[str, tuple[Effort, ...]] = {
+    GPT_5_6_SOL: ("low", "medium", "high", "xhigh", "max"),
+    GPT_5_6_TERRA: ("low", "medium", "high", "xhigh", "max"),
+    # GPT-5.5 tops out at xhigh; it does not accept max.
+    GPT_5_5: ("low", "medium", "high", "xhigh"),
+}
+"""Effort levels each known model accepts, per current OpenAI docs.
+
+Keys mirror :data:`_CAPABILITIES_BY_MODEL` — the enumerable catalogue a
+consumer lists models from instead of hand-maintaining a parallel table.
+The vendor vocabulary also includes ``none``/``minimal``, which sit outside
+the :data:`~agent_harness.core.models.Effort` dial; omitting ``effort``
+(and ``thinking_budget``) says nothing on the wire instead.
+"""
+
+
+def supported_effort_levels(model: str) -> tuple[Effort, ...]:
+    """Effort levels ``model`` accepts, resolved from the catalogue.
+
+    Raises :class:`ConfigError` naming the model when it is unknown, so a
+    consumer can never offer a level the vendor documents as unsupported.
+
+    Example:
+        >>> "max" in supported_effort_levels(GPT_5_5)
+        False
+    """
+    levels = EFFORT_LEVELS_BY_MODEL.get(model)
+    if levels is None:
+        raise ConfigError(
+            f"no known effort levels for OpenAI model {model!r}; "
+            "see EFFORT_LEVELS_BY_MODEL for the supported ids"
+        )
+    return levels
 
 
 def _now() -> datetime:
@@ -208,9 +263,21 @@ class OpenAIResponsesModel:
         name: str = GPT_5_5,
         capabilities: ModelCapabilities | None = None,
     ) -> None:
+        if capabilities is None:
+            capabilities = _CAPABILITIES_BY_MODEL.get(name)
+            if capabilities is None:
+                raise ConfigError(
+                    f"no known capabilities for OpenAI model {name!r}; pass "
+                    "capabilities explicitly for models outside "
+                    "_CAPABILITIES_BY_MODEL"
+                )
+            # The catalogue shares one ModelCapabilities across ids; copy so
+            # mutating one model's resolved instance can never silently
+            # rewrite every other model's.
+            capabilities = capabilities.model_copy()
         self.name = name
         self.provider = provider
-        self.capabilities = capabilities if capabilities is not None else _CAPS_GPT_5_5
+        self.capabilities = capabilities
 
     # ----- message translation ---------------------------------------------
     #
@@ -301,15 +368,18 @@ class OpenAIResponsesModel:
             payload["tools"] = wire_tools
         if settings.parallel_tool_calls is not None and self.capabilities.parallel_tool_calls:
             payload["parallel_tool_calls"] = settings.parallel_tool_calls
-        if self.capabilities.thinking and settings.thinking_budget is not None:
-            # Map budget → reasoning effort buckets (low/medium/high).
-            # "summary" is required to get any reasoning text back: without it
-            # the Responses API emits no reasoning_summary_text deltas at all,
-            # so the handler below is dead code and thinking events never fire.
-            payload["reasoning"] = {
-                "effort": _budget_to_effort(settings.thinking_budget),
-                "summary": "auto",
-            }
+        # An explicit effort wins over the budget-derived bucket — the
+        # bucketing (low/medium/high) can express neither xhigh nor max, so
+        # deferring to it would silently downgrade what the caller asked for.
+        effort: str | None = settings.effort
+        if effort is None and settings.thinking_budget is not None:
+            effort = _budget_to_effort(settings.thinking_budget)
+        if self.capabilities.thinking and effort is not None:
+            # "summary" is required to get any reasoning text back: without
+            # it the Responses API emits no reasoning_summary_text deltas
+            # at all, so the handler below is dead code and thinking events
+            # never fire.
+            payload["reasoning"] = {"effort": effort, "summary": "auto"}
         for k, v in settings.extra.items():
             payload[k] = v
         return payload

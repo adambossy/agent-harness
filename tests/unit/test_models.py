@@ -154,7 +154,15 @@ def test_model_settings_defaults_are_all_none_or_empty() -> None:
     assert s.seed is None
     assert s.parallel_tool_calls is None
     assert s.thinking_budget is None
+    assert s.effort is None
     assert s.extra == {}
+
+
+def test_model_settings_effort_rejects_unknown_levels() -> None:
+    # Effort is a closed Literal: a typo must fail loudly at construction,
+    # not travel to the API as an invalid request.
+    with pytest.raises(ValueError):
+        ModelSettings(effort="ultra")  # type: ignore[arg-type]
 
 
 def test_message_metadata_defaults_to_empty_dict() -> None:
