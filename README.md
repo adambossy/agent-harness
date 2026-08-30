@@ -71,7 +71,7 @@ result = asyncio.run(agent.run("What's the weather in Paris?"))
 print(result.output)  # -> e.g. "It's sunny in Paris."
 ```
 
-### OpenRouter (GLM-5.2, Kimi K3, …)
+### OpenRouter (GLM-5.3, GLM-5.3-Flash, Kimi K3, …)
 
 OpenRouter's `/api/v1/messages` endpoint is Anthropic-compatible, so the
 Anthropic model adapter drives it directly. Every request carries a routing
@@ -80,11 +80,11 @@ policy restricting which upstream providers may serve it:
 ```python
 from agent_harness import Agent
 from agent_harness.providers.openrouter import (
-    CAPS_GLM_5_2, GLM_5_2, OpenRouterModel, OpenRouterProvider,
+    CAPS_GLM_5_3, GLM_5_3, OpenRouterModel, OpenRouterProvider,
 )
 
 provider = OpenRouterProvider(api_key="sk-or-…")
-model = OpenRouterModel(provider=provider, name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+model = OpenRouterModel(provider=provider, name=GLM_5_3, capabilities=CAPS_GLM_5_3)
 agent = Agent(name="assistant", model=model)
 ```
 
