@@ -1,4 +1,5 @@
-"""OpenRouter provider — GLM-5.2, Kimi K3, and anything else OpenRouter serves.
+"""OpenRouter provider — GLM-5.3, GLM-5.3-Flash, Kimi K3, and anything else
+OpenRouter serves.
 
 OpenRouter exposes an Anthropic Messages-compatible surface at
 ``/api/v1/messages`` (the "Anthropic Skin") that accepts the same
@@ -25,10 +26,12 @@ from agent_harness.core.models import (
 from .anthropic import AnthropicMessagesModel, AnthropicProvider
 
 __all__ = [
-    "CAPS_GLM_5_2",
+    "CAPS_GLM_5_3",
+    "CAPS_GLM_5_3_FLASH",
     "CAPS_KIMI_K3",
     "EFFORT_LEVELS_BY_MODEL",
-    "GLM_5_2",
+    "GLM_5_3",
+    "GLM_5_3_FLASH",
     "KIMI_K3",
     "MOONSHOT_DIRECT",
     "OPENROUTER_BASE_URL",
@@ -86,10 +89,15 @@ US_FP8_ZDR = RoutingPolicy(
 """US-headquartered, FP8-or-better, zero-data-retention endpoints, cheapest first.
 
 Verified against the live OpenRouter endpoint API on 2026-07-25: for
-``z-ai/glm-5.2`` this matches 7 endpoints, cheapest ``novita/fp8`` at
+``z-ai/glm-5.2`` this matched 7 endpoints, cheapest ``novita/fp8`` at
 $0.70/$2.21 per Mtok with the full 1M context. Because ``sort="price"``
 orders the set, widening ``only`` adds fallback resilience without adding
 cost — pricier endpoints serve only when cheaper ones fail.
+
+GLM-5.2 is retired in favour of GLM-5.3 (see :data:`GLM_5_3`); this policy
+carries over unchanged since it targets the provider allowlist, not a model
+version, but the endpoint counts above have not been re-verified against
+``z-ai/glm-5.3`` or ``z-ai/glm-5.3-flash``.
 
 Caveat: OpenRouter has no region field. "US" here means US-headquartered;
 ``datacenters`` is declared for only three of these six providers.
@@ -152,13 +160,16 @@ class OpenRouterProvider(AnthropicProvider):
         )
 
 
-GLM_5_2 = "z-ai/glm-5.2"
-"""Zhipu / Z.ai GLM-5.2 on OpenRouter."""
+GLM_5_3 = "z-ai/glm-5.3"
+"""Zhipu / Z.ai GLM-5.3 on OpenRouter. Supersedes GLM-5.2."""
+
+GLM_5_3_FLASH = "z-ai/glm-5.3-flash"
+"""Zhipu / Z.ai GLM-5.3-Flash on OpenRouter — the lighter, faster sibling."""
 
 KIMI_K3 = "moonshotai/kimi-k3"
 """Moonshot AI Kimi K3 on OpenRouter."""
 
-CAPS_GLM_5_2 = ModelCapabilities(
+CAPS_GLM_5_3 = ModelCapabilities(
     parallel_tool_calls=True,
     thinking=True,
     cache_control=False,
@@ -170,10 +181,28 @@ CAPS_GLM_5_2 = ModelCapabilities(
     max_output_tokens=131_072,
     supports_compaction=False,
 )
-"""GLM-5.2 limits, from the cheapest routable endpoint (``novita/fp8``).
+"""GLM-5.3 limits, carried over from the verified GLM-5.2 endpoint limits
+(cheapest routable endpoint, ``novita/fp8``) pending re-verification.
 
 ``cache_control`` is False: OpenRouter's automatic prompt caching on the
 Anthropic Skin is documented for Claude models only.
+"""
+
+CAPS_GLM_5_3_FLASH = ModelCapabilities(
+    parallel_tool_calls=True,
+    thinking=True,
+    cache_control=False,
+    vision=False,
+    audio_input=False,
+    audio_output=False,
+    structured_output=True,
+    context_window=1_048_576,
+    max_output_tokens=131_072,
+    supports_compaction=False,
+)
+"""GLM-5.3-Flash limits. Mirrors :data:`CAPS_GLM_5_3` pending its own
+verified endpoint limits — Flash is priced and served separately on
+OpenRouter but has not yet been checked against the live endpoint API.
 """
 
 CAPS_KIMI_K3 = ModelCapabilities(
@@ -191,7 +220,8 @@ CAPS_KIMI_K3 = ModelCapabilities(
 """Kimi K3 limits. Multimodal input; reasoning is always on upstream."""
 
 _CAPABILITIES_BY_MODEL: dict[str, ModelCapabilities] = {
-    GLM_5_2: CAPS_GLM_5_2,
+    GLM_5_3: CAPS_GLM_5_3,
+    GLM_5_3_FLASH: CAPS_GLM_5_3_FLASH,
     KIMI_K3: CAPS_KIMI_K3,
 }
 """Known OpenRouter model ids → their verified capabilities.
@@ -208,7 +238,8 @@ EFFORT_LEVELS_BY_MODEL: dict[str, tuple[Effort, ...]] = {
     # output_config.effort vocabulary for every model it serves; whether a
     # given upstream honours the level is up to that upstream, and an
     # unhonoured level fails soft (the request stays valid).
-    GLM_5_2: ("low", "medium", "high", "xhigh", "max"),
+    GLM_5_3: ("low", "medium", "high", "xhigh", "max"),
+    GLM_5_3_FLASH: ("low", "medium", "high", "xhigh", "max"),
     KIMI_K3: ("low", "medium", "high", "xhigh", "max"),
 }
 """Effort levels each known model accepts, per OpenRouter's endpoint schema.
@@ -251,14 +282,14 @@ class OpenRouterModel(AnthropicMessagesModel):
     cage.
 
     Example:
-        >>> # OpenRouterModel(provider=p, name=GLM_5_2, capabilities=CAPS_GLM_5_2)  # doctest: +SKIP
+        >>> # OpenRouterModel(provider=p, name=GLM_5_3, capabilities=CAPS_GLM_5_3)  # doctest: +SKIP
     """
 
     def __init__(
         self,
         *,
         provider: OpenRouterProvider,
-        name: str = GLM_5_2,
+        name: str = GLM_5_3,
         capabilities: ModelCapabilities | None = None,
         routing: RoutingPolicy | None = None,
     ) -> None:
@@ -268,7 +299,7 @@ class OpenRouterModel(AnthropicMessagesModel):
                 raise ConfigError(
                     f"no known capabilities for OpenRouter model {name!r}; pass "
                     "capabilities explicitly for models outside "
-                    "_CAPABILITIES_BY_MODEL (GLM_5_2, KIMI_K3)"
+                    "_CAPABILITIES_BY_MODEL (GLM_5_3, GLM_5_3_FLASH, KIMI_K3)"
                 )
             # Catalogue values are shared instances; copy so mutating one
             # model's resolved instance can never rewrite another's.

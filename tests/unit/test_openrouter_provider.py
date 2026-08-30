@@ -25,10 +25,12 @@ from agent_harness.core.models import (
 )
 from agent_harness.providers.openrouter import (
     _CAPABILITIES_BY_MODEL,
-    CAPS_GLM_5_2,
+    CAPS_GLM_5_3,
+    CAPS_GLM_5_3_FLASH,
     CAPS_KIMI_K3,
     EFFORT_LEVELS_BY_MODEL,
-    GLM_5_2,
+    GLM_5_3,
+    GLM_5_3_FLASH,
     KIMI_K3,
     MOONSHOT_DIRECT,
     OPENROUTER_BASE_URL,
@@ -197,9 +199,16 @@ def _msgs() -> list[Message]:
 
 
 def test_payload_carries_the_default_routing_policy() -> None:
-    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    m = _model(name=GLM_5_3, capabilities=CAPS_GLM_5_3)
     payload = m._build_payload(_msgs(), [], ModelSettings())
-    assert payload["model"] == "z-ai/glm-5.2"
+    assert payload["model"] == "z-ai/glm-5.3"
+    assert payload["extra_body"]["provider"] == US_FP8_ZDR.to_wire()
+
+
+def test_glm_5_3_flash_payload_carries_its_own_model_id() -> None:
+    m = _model(name=GLM_5_3_FLASH, capabilities=CAPS_GLM_5_3_FLASH)
+    payload = m._build_payload(_msgs(), [], ModelSettings())
+    assert payload["model"] == "z-ai/glm-5.3-flash"
     assert payload["extra_body"]["provider"] == US_FP8_ZDR.to_wire()
 
 
@@ -213,14 +222,14 @@ def test_explicit_routing_policy_overrides_the_default() -> None:
 def test_caller_supplied_extra_body_provider_wins() -> None:
     # ModelSettings.extra is merged by the parent _build_payload before we run,
     # so a caller who states a policy explicitly must not be overridden.
-    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    m = _model(name=GLM_5_3, capabilities=CAPS_GLM_5_3)
     settings = ModelSettings(extra={"extra_body": {"provider": {"only": ["baseten"]}}})
     payload = m._build_payload(_msgs(), [], settings)
     assert payload["extra_body"]["provider"] == {"only": ["baseten"]}
 
 
 def test_caller_extra_body_keys_are_preserved_alongside_routing() -> None:
-    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    m = _model(name=GLM_5_3, capabilities=CAPS_GLM_5_3)
     settings = ModelSettings(extra={"extra_body": {"transforms": ["middle-out"]}})
     payload = m._build_payload(_msgs(), [], settings)
     assert payload["extra_body"]["transforms"] == ["middle-out"]
@@ -228,8 +237,10 @@ def test_caller_extra_body_keys_are_preserved_alongside_routing() -> None:
 
 
 def test_model_capability_constants_match_live_endpoint_limits() -> None:
-    assert CAPS_GLM_5_2.context_window == 1_048_576
-    assert CAPS_GLM_5_2.max_output_tokens == 131_072
+    assert CAPS_GLM_5_3.context_window == 1_048_576
+    assert CAPS_GLM_5_3.max_output_tokens == 131_072
+    assert CAPS_GLM_5_3_FLASH.context_window == 1_048_576
+    assert CAPS_GLM_5_3_FLASH.max_output_tokens == 131_072
     assert CAPS_KIMI_K3.context_window == 1_048_576
 
 
@@ -240,15 +251,20 @@ def test_model_satisfies_protocol() -> None:
 # --- tests: capability resolution (Finding 1) -------------------------------
 
 
-def test_default_construction_resolves_glm_5_2_capabilities() -> None:
+def test_default_construction_resolves_glm_5_3_capabilities() -> None:
     # Regression test: capabilities=None must resolve from
     # _CAPABILITIES_BY_MODEL by name, never fall through to the parent's
     # Anthropic-Opus default.
     m = _model()
-    assert m.capabilities == CAPS_GLM_5_2
+    assert m.capabilities == CAPS_GLM_5_3
     assert m.capabilities.cache_control is False
     assert m.capabilities.context_window == 1_048_576
     assert m.capabilities.max_output_tokens == 131_072
+
+
+def test_glm_5_3_flash_with_no_explicit_capabilities_resolves_from_name() -> None:
+    m = _model(name=GLM_5_3_FLASH)
+    assert m.capabilities == CAPS_GLM_5_3_FLASH
 
 
 def test_kimi_k3_with_no_explicit_capabilities_resolves_from_name() -> None:
@@ -293,7 +309,7 @@ async def test_request_passes_routing_policy_through_to_the_sdk_call() -> None:
     ]
     client = _build_fake_client(events)
     provider = OpenRouterProvider(client=client)
-    model = OpenRouterModel(provider=provider, name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    model = OpenRouterModel(provider=provider, name=GLM_5_3, capabilities=CAPS_GLM_5_3)
 
     async for _ in model.request([], [], ModelSettings()):
         pass
@@ -352,7 +368,7 @@ def test_build_payload_does_not_mutate_the_callers_extra_body() -> None:
     """
     caller_extra_body: dict[str, Any] = {"transforms": ["middle-out"]}
     settings = ModelSettings(extra={"extra_body": caller_extra_body})
-    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    m = _model(name=GLM_5_3, capabilities=CAPS_GLM_5_3)
     payload = m._build_payload(_msgs(), [], settings)
 
     assert payload["extra_body"]["provider"] == US_FP8_ZDR.to_wire()
@@ -361,7 +377,7 @@ def test_build_payload_does_not_mutate_the_callers_extra_body() -> None:
 
 
 def test_build_payload_rejects_a_non_dict_extra_body() -> None:
-    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    m = _model(name=GLM_5_3, capabilities=CAPS_GLM_5_3)
     settings = ModelSettings(extra={"extra_body": "junk"})
     with pytest.raises(ConfigError, match="extra_body"):
         m._build_payload(_msgs(), [], settings)
@@ -373,10 +389,14 @@ def test_build_payload_rejects_a_non_dict_extra_body() -> None:
 def test_effort_catalogue_mirrors_the_capabilities_catalogue() -> None:
     # One enumerable catalogue: a consumer listing models from either table
     # must see the same ids.
-    assert set(EFFORT_LEVELS_BY_MODEL) == set(_CAPABILITIES_BY_MODEL) == {GLM_5_2, KIMI_K3}
+    assert set(EFFORT_LEVELS_BY_MODEL) == set(_CAPABILITIES_BY_MODEL) == {
+        GLM_5_3,
+        GLM_5_3_FLASH,
+        KIMI_K3,
+    }
 
 
-@pytest.mark.parametrize("name", [GLM_5_2, KIMI_K3])
+@pytest.mark.parametrize("name", [GLM_5_3, GLM_5_3_FLASH, KIMI_K3])
 def test_openrouter_models_accept_the_full_effort_vocabulary(name: str) -> None:
     # OpenRouter's Anthropic-compatible endpoint documents all five levels;
     # whether an upstream honours a level fails soft, not invalid.
@@ -392,7 +412,7 @@ def test_effort_flows_through_to_output_config() -> None:
     # Inherited from the Anthropic adapter: OpenRouter documents
     # output_config.effort with the same vocabulary, so the parent's emission
     # is already the right wire shape here.
-    m = _model(name=GLM_5_2, capabilities=CAPS_GLM_5_2)
+    m = _model(name=GLM_5_3, capabilities=CAPS_GLM_5_3)
     payload = m._build_payload(_msgs(), [], ModelSettings(effort="xhigh"))
     assert payload["output_config"] == {"effort": "xhigh"}
     assert payload["extra_body"]["provider"] == US_FP8_ZDR.to_wire()

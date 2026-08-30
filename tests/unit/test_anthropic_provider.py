@@ -467,7 +467,7 @@ def test_module_imports_without_sdk() -> None:
 async def test_signature_delta_is_captured_into_the_thinking_block() -> None:
     """Claude models stream a real signature; it must survive into the block.
 
-    GLM-5.2 and Kimi K3 cannot exercise this — they emit an empty signature and
+    GLM-5.3 and Kimi K3 cannot exercise this — they emit an empty signature and
     never send a signature_delta — so the non-empty path is pinned here.
     """
     events = [
@@ -500,7 +500,7 @@ async def test_signature_delta_is_captured_into_the_thinking_block() -> None:
 
 
 async def test_signature_defaults_to_empty_when_the_stream_sends_none() -> None:
-    # OpenRouter-served GLM-5.2 / Kimi K3 shape: signature "" on
+    # OpenRouter-served GLM-5.3 / Kimi K3 shape: signature "" on
     # content_block_start, no signature_delta ever.
     events = [
         _FakeStreamEvent(type="message_start", message=_FakeStreamEvent(id="msg_1")),
