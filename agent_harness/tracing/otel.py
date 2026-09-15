@@ -27,9 +27,7 @@ Wiring (the app owns the exporter and the bus lifecycle)::
 
     from agent_harness.tracing import OTELSubscriber
 
-    sub = OTELSubscriber(
-        bus, root_name="my-agent-run", root_attributes={"session.id": conversation_id}
-    )
+    sub = OTELSubscriber(bus, root_name="my-agent-run", root_attributes={"session.id": conversation_id})
     task = sub.start()  # spawn the consumer task
     await agent.run(prompt, event_bus=bus)
     await bus.close()
@@ -61,6 +59,7 @@ from agent_harness.core.events import (
     ToolExecEnd,
     ToolExecStart,
 )
+from agent_harness.core.models import Message, TextBlock
 
 if TYPE_CHECKING:  # pragma: no cover - typing-only
     import asyncio
@@ -74,7 +73,11 @@ _USAGE_IN = "gen_ai.usage.input_tokens"
 _USAGE_OUT = "gen_ai.usage.output_tokens"
 _USAGE_CACHE_READ = "gen_ai.usage.cache_read.input_tokens"
 _USAGE_CACHE_WRITE = "gen_ai.usage.cache_creation.input_tokens"
+_PROMPT = "gen_ai.prompt"
 _COMPLETION = "gen_ai.completion"
+_OUTPUT_VALUE = "output.value"
+_LANGFUSE_INPUT = "langfuse.observation.input"
+_LANGFUSE_OUTPUT = "langfuse.observation.output"
 _TOOL_NAME = "gen_ai.tool.name"
 _TOOL_ARGS = "gen_ai.tool.call.arguments"
 _TOOL_RESULT = "gen_ai.tool.call.result"
@@ -86,6 +89,28 @@ def _json(value: Any) -> str:
         return json.dumps(value, default=str)
     except (TypeError, ValueError):
         return str(value)
+
+
+def _message_dict(message: Message) -> dict[str, Any]:
+    """Render provider-neutral message content for telemetry.
+
+    Timestamps and provider metadata are request bookkeeping rather than model
+    content. Thinking signatures are opaque replay credentials, so traces keep
+    the visible reasoning text without copying those credentials.
+    """
+    content: list[dict[str, Any]] = []
+    for block in message.content:
+        rendered = block.model_dump(mode="json")
+        rendered.pop("signature", None)
+        content.append(rendered)
+    return {"role": message.role, "content": content}
+
+
+def _completion(message: Message) -> str:
+    """Keep plain text readable; encode multi-block responses as JSON."""
+    if len(message.content) == 1 and isinstance(message.content[0], TextBlock):
+        return message.content[0].text
+    return _json(_message_dict(message))
 
 
 class OTELSubscriber:
@@ -143,6 +168,8 @@ class OTELSubscriber:
         self._root: Any = None
         self._root_ctx: Any = None
         self._model_name: str | None = None
+        self._model_input: str | None = None
+        self._last_completion: str | None = None
 
         # Eager subscribe (synchronous) so early events aren't dropped.
         self._events = bus.subscribe()
@@ -176,6 +203,7 @@ class OTELSubscriber:
             self.on_run_start(event)
         elif isinstance(event, ModelStart):
             self._model_name = event.model_name
+            self._model_input = _json([_message_dict(message) for message in event.messages])
         elif isinstance(event, MessageStart):
             self.on_message_start(event)
         elif isinstance(event, MessageEnd):
@@ -205,10 +233,13 @@ class OTELSubscriber:
         if self._root is None:
             return
         model = self._model_name or "model"
+        attributes: dict[str, Any] = {_OP: "chat", _REQUEST_MODEL: model}
+        if self._model_input is not None:
+            attributes[_PROMPT] = self._model_input
         span = self.tracer.start_span(
             f"chat {model}",
             context=self._root_ctx,
-            attributes={_OP: "chat", _REQUEST_MODEL: model},
+            attributes=attributes,
         )
         self.spans[event.message_id] = span
 
@@ -224,7 +255,9 @@ class OTELSubscriber:
         if usage.cache_write_tokens:
             span.set_attribute(_USAGE_CACHE_WRITE, usage.cache_write_tokens)
         with contextlib.suppress(Exception):
-            span.set_attribute(_COMPLETION, event.final.text)
+            completion = _completion(event.final)
+            span.set_attribute(_COMPLETION, completion)
+            self._last_completion = completion
         span.end()
 
     def on_tool_exec_start(self, event: ToolExecStart) -> None:
@@ -266,9 +299,24 @@ class OTELSubscriber:
         with contextlib.suppress(Exception):
             output = getattr(event.result, "output", None)
             if output is not None:
-                self._root.set_attribute(_COMPLETION, _json(output))
+                rendered = output if isinstance(output, str) else _json(output)
+                self._set_root_output(rendered)
+            elif self._last_completion is not None:
+                self._set_root_output(self._last_completion)
         self._root.end()
         self._root = None
+
+    def _set_root_output(self, output: str) -> None:
+        """Set generic output conventions plus the caller's Langfuse seam."""
+        self._root.set_attribute(_COMPLETION, output)
+        # Agent/chain spans are not generations. Some OTEL backends only
+        # promote ``gen_ai.completion`` for generation spans, while
+        # ``output.value`` is the cross-instrumentation operation fallback.
+        self._root.set_attribute(_OUTPUT_VALUE, output)
+        # Keep the harness backend-neutral by only completing this explicit
+        # backend mapping when the embedding app opted into it on the root.
+        if _LANGFUSE_INPUT in self.root_attributes:
+            self._root.set_attribute(_LANGFUSE_OUTPUT, output)
 
     def on_error(self, event: Error) -> None:
         if self._root is None:

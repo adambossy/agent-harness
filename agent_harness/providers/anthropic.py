@@ -448,7 +448,7 @@ class AnthropicMessagesModel:
     ) -> AsyncIterator[Any]:
         """Stream a model response as canonical ``ModelEvent``s."""
         payload = self._build_payload(messages, tools, settings)
-        yield ModelStart(model_name=self.name)
+        yield ModelStart(model_name=self.name, messages=tuple(messages))
         client = self.provider.client
 
         message_id: str = ""

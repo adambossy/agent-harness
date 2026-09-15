@@ -90,9 +90,18 @@ class NodeExit:
 
 @dataclass(frozen=True, slots=True)
 class ModelStart:
-    """Provider request is about to be issued."""
+    """Provider request is about to be issued.
+
+    ``messages`` is a tuple snapshot of the canonical request input so
+    subscribers can inspect the call without knowing the provider wire format.
+
+    Example:
+        >>> ModelStart(model_name="m").messages
+        ()
+    """
 
     model_name: str
+    messages: tuple[Message, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

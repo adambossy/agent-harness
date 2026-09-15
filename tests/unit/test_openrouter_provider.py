@@ -14,6 +14,7 @@ import pytest
 
 from agent_harness.core.credentials import ApiKeyCredential, OAuthCredential
 from agent_harness.core.errors import ConfigError, NotSupportedError
+from agent_harness.core.events import ModelStart
 from agent_harness.core.models import (
     Message,
     Model,
@@ -320,6 +321,24 @@ async def test_request_passes_routing_policy_through_to_the_sdk_call() -> None:
     assert kwargs["extra_body"]["provider"] == US_FP8_ZDR.to_wire()
 
 
+async def test_request_exposes_canonical_messages_to_subscribers() -> None:
+    events = [
+        _FakeStreamEvent(type="message_start", message=_FakeStreamEvent(id="msg_1")),
+        _FakeStreamEvent(type="message_stop", message=None),
+    ]
+    model = OpenRouterModel(
+        provider=OpenRouterProvider(client=_build_fake_client(events)),
+        name=GLM_5_3,
+        capabilities=CAPS_GLM_5_3,
+    )
+    messages = _msgs()
+
+    emitted = [event async for event in model.request(messages, [], ModelSettings())]
+
+    start = next(event for event in emitted if isinstance(event, ModelStart))
+    assert start.messages == tuple(messages)
+
+
 def test_thinking_blocks_carry_a_signature_field() -> None:
     # Behaviour now lives on the parent adapter; asserted here too because
     # GLM/K3 reason on every turn, so this path is exercised hardest here.
@@ -389,11 +408,15 @@ def test_build_payload_rejects_a_non_dict_extra_body() -> None:
 def test_effort_catalogue_mirrors_the_capabilities_catalogue() -> None:
     # One enumerable catalogue: a consumer listing models from either table
     # must see the same ids.
-    assert set(EFFORT_LEVELS_BY_MODEL) == set(_CAPABILITIES_BY_MODEL) == {
-        GLM_5_3,
-        GLM_5_3_FLASH,
-        KIMI_K3,
-    }
+    assert (
+        set(EFFORT_LEVELS_BY_MODEL)
+        == set(_CAPABILITIES_BY_MODEL)
+        == {
+            GLM_5_3,
+            GLM_5_3_FLASH,
+            KIMI_K3,
+        }
+    )
 
 
 @pytest.mark.parametrize("name", [GLM_5_3, GLM_5_3_FLASH, KIMI_K3])

@@ -155,6 +155,7 @@ class FakeModel:
         settings: ModelSettings,
     ) -> AsyncIterator[Any]:
         """Yield the next scripted turn as a typed model-event stream."""
+        request_messages = tuple(messages)
         del messages, tools, settings
         if self._turn >= len(self._script):
             raise AssertionError(
@@ -165,7 +166,7 @@ class FakeModel:
         self._turn += 1
 
         msg_id = f"msg_{self._turn:03d}"
-        yield ModelStart(model_name=self.name)
+        yield ModelStart(model_name=self.name, messages=request_messages)
         yield MessageStart(message_id=msg_id)
 
         partial_text = ""
