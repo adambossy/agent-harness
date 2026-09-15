@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from agent_harness.core.agent import Agent
+from agent_harness.core.models import TextBlock
 from agent_harness.extras.reminders import InMemoryReminderQueue, ReminderQueue
 from agent_harness.sessions.inmemory import InMemorySession
 from tests.fakes import FakeTurn, make_model
@@ -47,7 +48,7 @@ async def test_user_message_carries_drained_reminders(
 
     msgs = await session.get_messages()
     user = next(m for m in msgs if m.role == "user")
-    texts = [b.text for b in user.content if getattr(b, "text", None)]
+    texts = [block.text for block in user.content if isinstance(block, TextBlock)]
     assert texts[0] == "hello"
     assert texts[1] == ('<system-reminder kind="onboarding">\nconnect plaid\n</system-reminder>')
     assert user.metadata["system_reminder_kinds"] == ["onboarding"]
